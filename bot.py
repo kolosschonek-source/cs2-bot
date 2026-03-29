@@ -153,7 +153,7 @@ def get_priority(change, momentum, spike):
 @client.event
 async def on_ready():
     print("Bot elindult!")
-    channel = client.get_channel(CHANNEL_ID)
+    channel = await client.fetch_channel(CHANNEL_ID)
 
     await channel.send("✅ Bot online és működik!")
 
@@ -161,8 +161,6 @@ async def on_ready():
         try:
             # ---------------- INVENTORY ----------------
             current_time = asyncio.get_event_loop().time()
-
-            print("CHECKING:", case)
 
             global last_heartbeat
             if current_time - last_heartbeat > 3600:
