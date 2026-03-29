@@ -16,4 +16,440 @@
     "Sawed-Off | Kiss♥Love",
     "Glock-18 | Winterized"
   ]
+  "Spectrum 2 Case": [
+    "AK-47 | The Empress",
+    "P250 | See Ya Later",
+    "MAC-10 | Oceanic",
+    "CZ75-Auto | Tacticat",
+    "Glock-18 | Off World",
+    "XM1014 | Ziggy",
+    "SG 553 | Phantom",
+    "UMP-45 | Exposure",
+    "PP-Bizon | High Roller",
+    "MP7 | Powercore",
+    "Negev | Lionfish",
+    "Sawed-Off | Morris"
+  ],
+  "Operation Phoenix Weapon Case": [
+    "AWP | Asiimov",
+    "AK-47 | Redline",
+    "P90 | Trigon",
+    "Nova | Antique",
+    "FAMAS | Sergeant",
+    "USP-S | Guardian",
+    "MAC-10 | Heat",
+    "Tec-9 | Sandstorm",
+    "Galil AR | Kami"
+  ],
+  "Fracture Case": [
+    "AK-47 | Legion of Anubis",
+    "Desert Eagle | Printstream",
+    "AWP | Exoskeleton",
+    "Glock-18 | Vogue",
+    "P90 | Freight",
+    "PP-Bizon | Runic",
+    "Negev | Ultralight",
+    "SG 553 | Ol' Rusty",
+    "SSG 08 | Mainframe 001",
+    "XM1014 | Entombed"
+  ],
+  "CS:GO Weapon Case": [
+    "AWP | Lightning Strike",
+    "AK-47 | Case Hardened",
+    "Desert Eagle | Hypnotic",
+    "USP-S | Dark Water",
+    "Glock-18 | Dragon Tattoo",
+    "M4A1-S | Dark Water",
+    "AUG | Wings",
+    "SG 553 | Ultraviolet",
+    "P250 | Metallic DDPAT"
+  ],
+  "Operation Bravo Case": [
+    "AK-47 | Fire Serpent",
+    "P90 | Emerald Dragon",
+    "Desert Eagle | Golden Koi",
+    "USP-S | Overgrowth",
+    "Dual Berettas | Black Limba",
+    "Nova | Tempest",
+    "G3SG1 | Demeter",
+    "UMP-45 | Bone Pile"
+  ],
+  "Chroma 2 Case": [
+    "M4A1-S | Hyper Beast",
+    "MAC-10 | Neon Rider",
+    "FAMAS | Djinn",
+    "Galil AR | Eco",
+    "Five-SeveN | Monkey Business",
+    "Desert Eagle | Bronze Deco",
+    "P250 | Valence",
+    "CZ75-Auto | Pole Position",
+    "UMP-45 | Grand Prix"
+  ]
+  "CS:GO Weapon Case 3": [
+    "AWP | Electric Hive",
+    "AK-47 | Jaguar",
+    "M4A1-S | Cyrex",
+    "Desert Eagle | Urban DDPAT",
+    "P90 | Module",
+    "CZ75-Auto | Yellow Jacket",
+    "FAMAS | Styx",
+    "USP-S | Stainless",
+    "Nova | Green Apple"
+  ],
+  "Operation Breakout Weapon Case": [
+    "M4A1-S | Cyrex",
+    "P90 | Asiimov",
+    "Glock-18 | Water Elemental",
+    "USP-S | Neo-Noir",
+    "Desert Eagle | Conspiracy",
+    "MP7 | Urban Hazard",
+    "P250 | Supernova",
+    "UMP-45 | Labyrinth"
+  ],
+  "Danger Zone Case": [
+    "AK-47 | Asiimov",
+    "AWP | Neo-Noir",
+    "Desert Eagle | Mecha Industries",
+    "USP-S | Flashback",
+    "P90 | Death by Kitty",
+    "MP9 | Modest Threat",
+    "Tec-9 | Fubar",
+    "Glock-18 | Oxide Blaze",
+    "Sawed-Off | Black Sand"
+  ],
+  "Snakebite Case": [
+    "AK-47 | Slate",
+    "USP-S | The Traitor",
+    "M4A1-S | Printstream",
+    "Glock-18 | Clear Polymer",
+    "Galil AR | Chromatic Aberration",
+    "SSG 08 | Parallax",
+    "MAC-10 | Button Masher",
+    "Nova | Windblown",
+    "P250 | Cyber Shell"
+  ],
+  "CS20 Case": [
+    "AWP | Wildfire",
+    "FAMAS | Commemoration",
+    "MP9 | Hydra",
+    "P90 | Nostalgia",
+    "M4A1-S | Control Panel",
+    "Glock-18 | Sacrifice",
+    "Tec-9 | Flash Out",
+    "SCAR-20 | Assault"
+  ],
+  "Killowatt Case": [
+    "AK-47 | Inheritance",
+    "USP-S | Jawbreaker",
+    "AWP | Chrome Cannon",
+    "M4A1-S | Black Lotus",
+    "Glock-18 | Block-18",
+    "P2000 | Lifeline",
+    "MP7 | Abyssal Apparition"
+  ]
+  "Operation Riptide Case": [
+    "AK-47 | Leet Museo",
+    "Desert Eagle | Ocean Drive",
+    "M4A4 | Spider Lily",
+    "USP-S | Ticket to Hell",
+    "Five-SeveN | Boost Protocol",
+    "MP9 | Starlight Protector",
+    "SG 553 | Dragon Tech",
+    "Glock-18 | Snack Attack",
+    "Dual Berettas | Flora Carnivora"
+  ],
+  "Winter Offensive Weapon Case": [
+    "M4A4 | Asiimov",
+    "P250 | Mehndi",
+    "AWP | Redline",
+    "P90 | Blind Spot",
+    "Desert Eagle | Cobalt Disruption",
+    "PP-Bizon | Cobalt Halftone",
+    "Galil AR | Blue Titanium",
+    "Nova | Rising Skull"
+  ],
+  "eSports 2013 Winter Case": [
+    "AK-47 | Red Laminate",
+    "AWP | BOOM",
+    "M4A4 | X-Ray",
+    "P90 | Death by Kitty",
+    "Desert Eagle | Crimson Web",
+    "USP-S | Serum"
+  ],
+  "Operation Vanguard Weapon Case": [
+    "AK-47 | Wasteland Rebel",
+    "M4A1-S | Basilisk",
+    "P2000 | Fire Elemental",
+    "SSG 08 | Big Iron",
+    "CZ75-Auto | Poison Dart",
+    "Glock-18 | Grinder",
+    "MP9 | Dart",
+    "UMP-45 | Delusion"
+  ],
+  "Spectrum Case": [
+    "AK-47 | Bloodsport",
+    "USP-S | Neo-Noir",
+    "M4A1-S | Decimator",
+    "P250 | Asiimov",
+    "MAC-10 | Last Dive",
+    "Galil AR | Crimson Tsunami",
+    "SCAR-20 | Bloodsport",
+    "CZ75-Auto | Xiangliu"
+  ],
+  "eSports 2014 Summer Case": [
+    "AK-47 | Jaguar",
+    "AWP | Corticera",
+    "M4A1-S | Atomic Alloy",
+    "P90 | Desert Warfare",
+    "Desert Eagle | Crimson Web",
+    "Glock-18 | Dragon Tattoo",
+    "USP-S | Guardian"
+  ]
+  "Horizon Case": [
+    "AK-47 | Neon Rider",
+    "Desert Eagle | Code Red",
+    "AWP | PAW",
+    "P90 | Traction",
+    "USP-S | Flashback",
+    "M4A1-S | Briefing",
+    "Five-SeveN | Capillary",
+    "Glock-18 | Warhawk",
+    "Tec-9 | Snek-9"
+  ],
+  "Dreams & Nightmares Case": [
+    "AK-47 | Nightwish",
+    "MP9 | Starlight Protector",
+    "USP-S | Ticket to Hell",
+    "FAMAS | Rapid Eye Movement",
+    "Dual Berettas | Melondrama",
+    "MP7 | Abyssal Apparition",
+    "P2000 | Lift Off",
+    "Sawed-Off | Spirit Board"
+  ],
+  "Chroma 3 Case": [
+    "M4A1-S | Chantico's Fire",
+    "PP-Bizon | Judgement of Anubis",
+    "P2000 | Oceanic",
+    "Desert Eagle | Naga",
+    "CZ75-Auto | Red Astor",
+    "XM1014 | Black Tie",
+    "Galil AR | Firefight",
+    "UMP-45 | Primal Saber",
+    "Tec-9 | Re-Entry"
+  ],
+  "Gamma Case": [
+    "M4A1-S | Mecha Industries",
+    "AK-47 | Neon Revolution",
+    "Glock-18 | Wasteland Rebel",
+    "P90 | Chopper",
+    "SG 553 | Aerial",
+    "Nova | Exo",
+    "Tec-9 | Ice Cap",
+    "P250 | Iron Clad"
+  ],
+  "Chroma Case": [
+    "AK-47 | Cartel",
+    "AWP | Man-o'-war",
+    "M4A4 | Dragon King",
+    "Glock-18 | Fade",
+    "MAC-10 | Neon Rider",
+    "Galil AR | Chatterbox",
+    "USP-S | Orion",
+    "P2000 | Fire Elemental"
+  ],
+  "CS:GO Weapon Case 2": [
+    "AWP | Lightning Strike",
+    "USP-S | Serum",
+    "M4A1-S | Blood Tiger",
+    "AK-47 | Elite Build",
+    "P90 | Cold Blooded",
+    "Desert Eagle | Conspiracy",
+    "Galil AR | Tuxedo",
+    "FAMAS | Hexane"
+  ]
+  "Revolver Case": [
+    "M4A4 | Royal Paladin",
+    "AK-47 | Point Disarray",
+    "R8 Revolver | Fade",
+    "Desert Eagle | Corinthian",
+    "AWP | Containment Breach",
+    "G3SG1 | Flux",
+    "SG 553 | Tiger Moth",
+    "PP-Bizon | Fuel Rod",
+    "Tec-9 | Avalanche"
+  ],
+  "Falchion Case": [
+    "AK-47 | Aquamarine Revenge",
+    "M4A4 | Evil Daimyo",
+    "FAMAS | Neural Net",
+    "P90 | Shallow Grave",
+    "CZ75-Auto | Yellow Jacket",
+    "MAC-10 | Rangeen",
+    "Galil AR | Rocket Pop",
+    "UMP-45 | Riot"
+  ],
+  "Operation Wildfire Case": [
+    "AK-47 | Fuel Injector",
+    "M4A4 | The Battlestar",
+    "AWP | Elite Build",
+    "Desert Eagle | Kumicho Dragon",
+    "FAMAS | Valence",
+    "Five-SeveN | Triumvirate",
+    "Nova | Hyper Beast",
+    "P2000 | Imperial Dragon"
+  ],
+  "Prisma Case": [
+    "AK-47 | Phantom Disruptor",
+    "AWP | Atheris",
+    "Desert Eagle | Light Rail",
+    "M4A4 | The Emperor",
+    "MAC-10 | Whitefish",
+    "Galil AR | Akoben",
+    "P90 | Off World",
+    "UMP-45 | Moonrise"
+  ],
+  "Gamma 2 Case": [
+    "M4A1-S | Hyper Beast",
+    "AK-47 | Neon Revolution",
+    "Glock-18 | Wasteland Rebel",
+    "P90 | Grim",
+    "SCAR-20 | Powercore",
+    "Nova | Exo",
+    "Tec-9 | Fuel Injector",
+    "P250 | Iron Clad"
+  ],
+  "Prisma 2 Case": [
+    "AK-47 | Phantom Disruptor",
+    "M4A1-S | Player Two",
+    "Five-SeveN | Fairy Tale",
+    "Desert Eagle | Blue Ply",
+    "MAC-10 | Disco Tech",
+    "Galil AR | Stone Cold",
+    "P250 | Inferno",
+    "AWP | Capillary"
+  ],
+  "Operation Broken Fang Case": [
+    "AK-47 | Legion of Anubis",
+    "M4A1-S | Printstream",
+    "Glock-18 | Neo-Noir",
+    "USP-S | Monster Mashup",
+    "MP5-SD | Oxide Oasis",
+    "Nova | Clear Polymer",
+    "SSG 08 | Parallax",
+    "P90 | Cocoa Rampage"
+  ],
+  "Glove Case": [
+    "AK-47 | Neon Revolution",
+    "M4A1-S | Mecha Industries",
+    "AWP | Phobos",
+    "USP-S | Cyrex",
+    "P2000 | Imperial Dragon",
+    "Glock-18 | Ironwork",
+    "Nova | Gila",
+    "SG 553 | Aerial"
+  ],
+  "Fever Case": [
+    "AK-47 | Slate",
+    "M4A4 | Tooth Fairy",
+    "AWP | Chromatic Aberration",
+    "Desert Eagle | Trigger Discipline",
+    "USP-S | Ticket to Hell",
+    "Glock-18 | Snack Attack",
+    "P90 | Cocoa Rampage"
+  ],
+  "Revolution Case": [
+    "AK-47 | Head Shot",
+    "M4A4 | Temukau",
+    "AWP | Duality",
+    "USP-S | Printstream",
+    "Glock-18 | Umbral Rabbit",
+    "P250 | Re.built",
+    "MP9 | Featherweight",
+    "MAC-10 | Sakkaku"
+  ],
+  "Clutch Case": [
+    "USP-S | Cortex",
+    "AWP | Mortis",
+    "M4A4 | Neo-Noir",
+    "AK-47 | Rat Rod",
+    "P2000 | Urban Hazard",
+    "MP7 | Cirrus",
+    "R8 Revolver | Grip",
+    "Five-SeveN | Flame Test"
+  ],
+  "Shadow Case": [
+    "M4A1-S | Golden Coil",
+    "USP-S | Kill Confirmed",
+    "AK-47 | Frontside Misty",
+    "Glock-18 | Wraiths",
+    "P250 | Wingshot",
+    "MP7 | Nemesis",
+    "FAMAS | Survivor Z",
+    "SSG 08 | Big Iron"
+  ],
+  "Shattered Web Case": [
+    "AK-47 | Wild Lotus",
+    "M4A4 | Neo-Noir",
+    "AWP | Containment Breach",
+    "USP-S | Cortex",
+    "P90 | Nostalgia",
+    "MP5-SD | Acid Wash",
+    "SG 553 | Colony IV",
+    "SSG 08 | Fever Dream"
+  ],
+  "Operation Hydra Case": [
+    "AK-47 | Orbit Mk01",
+    "M4A4 | Hellfire",
+    "Five-SeveN | Hyper Beast",
+    "Galil AR | Sugar Rush",
+    "USP-S | Blueprint",
+    "P2000 | Woodsman",
+    "MAC-10 | Aloha",
+    "SSG 08 | Death's Head"
+  ],
+  "Recoil Case": [
+    "AK-47 | Ice Coaled",
+    "USP-S | Printstream",
+    "AWP | Chromatic Aberration",
+    "Dual Berettas | Flora Carnivora",
+    "SG 553 | Dragon Tech",
+    "R8 Revolver | Crazy 8",
+    "P90 | Vent Rush",
+    "M249 | Downtown",
+    "FAMAS | Meow 36",
+    "Galil AR | Destroyer",
+    "MAC-10 | Monkeyflage",
+    "Negev | Drop Me",
+    "UMP-45 | Roadblock",
+    "Sawed-Off | Kiss♥Love",
+    "Glock-18 | Winterized"
+  ],
+  "eSports 2013 Case": [
+    "AK-47 | Red Laminate",
+    "AWP | BOOM",
+    "M4A4 | X-Ray",
+    "P90 | Death by Kitty",
+    "Desert Eagle | Hypnotic",
+    "USP-S | Dark Water"
+  ],
+  "Huntsman Weapon Case": [
+    "AK-47 | Vulcan",
+    "M4A1-S | Atomic Alloy",
+    "AWP | Corticera",
+    "USP-S | Stainless",
+    "P90 | Module",
+    "Nova | Koi",
+    "CZ75-Auto | Poison Dart",
+    "Galil AR | Kami"
+  ],
+  "Gallery Case": [
+    "AK-47 | The Outsiders",
+    "M4A1-S | Vaporwave",
+    "AWP | Silk Tiger",
+    "USP-S | Royal Guard",
+    "Glock-18 | Off World",
+    "P250 | Asiimov",
+    "MAC-10 | Neon Rider"
+  ]
+}
 }
