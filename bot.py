@@ -162,6 +162,8 @@ async def on_ready():
             # ---------------- INVENTORY ----------------
             current_time = asyncio.get_event_loop().time()
 
+            print("CHECKING:", case)
+
             global last_heartbeat
             if current_time - last_heartbeat > 3600:
                 await channel.send("💓 Bot még online és figyel!")
@@ -200,10 +202,14 @@ async def on_ready():
                         )
                         
             inventory = get_inventory()
+            
+            print("ALL CASES:", len(ALL_CASES))
+            print("INVENTORY:", len(inventory))
 
             for item in inventory:
                 prices = get_price_cached(item)
                 res = analyze(prices)
+                print(item, len(prices))
                 if not res:
                     continue
 
