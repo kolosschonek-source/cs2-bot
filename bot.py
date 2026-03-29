@@ -112,31 +112,14 @@ def get_inventory():
     url = f"https://steamcommunity.com/inventory/{STEAM_ID}/730/2?l=english&count=5000"
     try:
         res = requests.get(url)
-        data = res.json()
 
-        items = set()
+        print("STATUS:", res.status_code)
+        print("TEXT START:", res.text[:300])
 
-        descriptions = data.get("descriptions", [])
-        assets = data.get("assets", [])
-
-        desc_dict = {}
-        for d in descriptions:
-            desc_dict[d["classid"] + "_" + d["instanceid"]] = d
-
-        for asset in assets:
-            key = asset["classid"] + "_" + asset["instanceid"]
-            if key in desc_dict:
-                item = desc_dict[key]
-                if "market_hash_name" in item:
-                    items.add(item["market_hash_name"])
-
-        print("RAW ASSETS:", len(assets))
-        print("RAW DESCRIPTIONS:", len(descriptions))
-
-        return list(items)
+        return []
 
     except Exception as e:
-        print("INVENTORY ERROR:", e)
+        print("ERROR:", e)
         return []
 
 def evaluate_performance(item_name, initial_price, prices):
