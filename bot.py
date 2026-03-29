@@ -159,6 +159,8 @@ async def on_ready():
 
     while True:
         try:
+            await channel.send("🔁 LOOP ÚJ CIKLUS INDULT")
+            print("LOOP RUNNING")
             # ---------------- INVENTORY ----------------
             current_time = asyncio.get_event_loop().time()
 
@@ -201,8 +203,8 @@ async def on_ready():
                         
             inventory = get_inventory()
             
-            print("ALL CASES:", len(ALL_CASES))
-            print("INVENTORY:", len(inventory))
+            await channel.send(f"📦 Inventory lekérve: {len(inventory)} item")
+            print("INVENTORY OK:", len(inventory))
 
             for item in inventory:
                 prices = get_price_cached(item)
