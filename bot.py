@@ -109,18 +109,23 @@ def analyze(prices):
 # INVENTORY
 # -----------------------------
 def get_inventory():
-    base_url = f"https://steamcommunity.com/inventory/{STEAM_ID}/730/2?l=english&count=5000"
+    url = f"https://steamcommunity.com/inventory/{STEAM_ID}/730/2?l=english&count=5000"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+        "Accept": "application/json",
+    }
 
     items = set()
     cursor = None
 
     try:
         while True:
-            url = base_url
+            final_url = url
             if cursor:
-                url += f"&start_assetid={cursor}"
+                final_url += f"&start_assetid={cursor}"
 
-            res = requests.get(url, timeout=10)
+            res = requests.get(final_url, headers=headers, timeout=10)
 
             if res.status_code != 200:
                 print("HTTP ERROR:", res.status_code)
@@ -131,7 +136,6 @@ def get_inventory():
             descriptions = data.get("descriptions", [])
             assets = data.get("assets", [])
 
-            # mapping: classid + instanceid
             desc_map = {}
             for d in descriptions:
                 key = f"{d.get('classid')}_{d.get('instanceid')}"
@@ -140,17 +144,14 @@ def get_inventory():
             for asset in assets:
                 key = f"{asset.get('classid')}_{asset.get('instanceid')}"
                 if key in desc_map:
-                    item = desc_map[key]
-                    name = item.get("market_hash_name")
+                    name = desc_map[key].get("market_hash_name")
                     if name:
                         items.add(name)
 
-            # pagination
-            more = data.get("more_items", False)
-            cursor = data.get("last_assetid")
-
-            if not more or not cursor:
+            if not data.get("more_items"):
                 break
+
+            cursor = data.get("last_assetid")
 
         print("TOTAL INVENTORY ITEMS:", len(items))
         return list(items)
@@ -158,7 +159,6 @@ def get_inventory():
     except Exception as e:
         print("INVENTORY ERROR:", e)
         return []
-        
 def evaluate_performance(item_name, initial_price, prices):
     if not prices:
         return None
