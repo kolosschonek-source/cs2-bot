@@ -34,7 +34,7 @@ CHANNEL_ID = 1487500804532207699
 STEAM_ID = "76561199813237489"
 
 CHECK_INTERVAL = 300
-THRESHOLD = 0.18
+THRESHOLD = 0.10
 MAX_ITEMS = 15
 
 client = discord.Client(intents=discord.Intents.default())
@@ -43,6 +43,7 @@ client = discord.Client(intents=discord.Intents.default())
 # PROFIT TRACKING
 # -----------------------------
 profit_log = defaultdict(list)
+last_heartbeat = 0
 buy_signals = {}
 
 # -----------------------------
@@ -161,6 +162,11 @@ async def on_ready():
             # ---------------- INVENTORY ----------------
             current_time = asyncio.get_event_loop().time()
 
+            global last_heartbeat
+            if current_time - last_heartbeat > 3600:
+                await channel.send("💓 Bot még online és figyel!")
+                last_heartbeat = current_time
+
             for item, data in list(buy_signals.items()):
                 elapsed = current_time - data["timestamp"]
 
@@ -192,6 +198,7 @@ async def on_ready():
                         await channel.send(
                             f"📊 24H PERFORMANCE\n{item}\nChange: {round(perf['24h']*100,2)}%"
                         )
+                        
             inventory = get_inventory()
 
             for item in inventory:
@@ -264,3 +271,4 @@ async def on_ready():
             await asyncio.sleep(60)
 
 client.run(TOKEN)
+
