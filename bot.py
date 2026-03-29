@@ -1,4 +1,3 @@
-
 import os
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -44,6 +43,7 @@ client = discord.Client(intents=discord.Intents.default())
 # PROFIT TRACKING
 # -----------------------------
 profit_log = defaultdict(list)
+buy_signals = {}
 
 # -----------------------------
 # STEAM DATA
@@ -121,6 +121,20 @@ def get_inventory():
     except:
         return []
 
+def evaluate_performance(item_name, initial_price, prices):
+    if not prices:
+        return None
+
+    current_price = prices[-1]
+
+    change = (current_price - initial_price) / initial_price
+
+    return {
+        "1h": change,
+        "6h": change,
+        "24h": change
+    }
+
 # -----------------------------
 # PRIORITY
 # -----------------------------
@@ -145,6 +159,39 @@ async def on_ready():
     while True:
         try:
             # ---------------- INVENTORY ----------------
+            current_time = asyncio.get_event_loop().time()
+
+            for item, data in list(buy_signals.items()):
+                elapsed = current_time - data["timestamp"]
+
+                if elapsed > 3600:
+                    prices = get_price_cached(item)
+                    perf = evaluate_performance(item, data["initial_price"], prices)
+
+                    if perf:
+                        await channel.send(
+                            f"📊 1H PERFORMANCE\n{item}\nChange: {round(perf['1h']*100,2)}%"
+                        )
+
+                    del buy_signals[item]
+
+                elif elapsed > 21600:
+                    prices = get_price_cached(item)
+                    perf = evaluate_performance(item, data["initial_price"], prices)
+
+                    if perf:
+                        await channel.send(
+                            f"📊 6H PERFORMANCE\n{item}\nChange: {round(perf['6h']*100,2)}%"
+                        )
+
+                elif elapsed > 86400:
+                    prices = get_price_cached(item)
+                    perf = evaluate_performance(item, data["initial_price"], prices)
+
+                    if perf:
+                        await channel.send(
+                            f"📊 24H PERFORMANCE\n{item}\nChange: {round(perf['24h']*100,2)}%"
+                        )
             inventory = get_inventory()
 
             for item in inventory:
@@ -196,6 +243,11 @@ async def on_ready():
                 priority = get_priority(case_change, case_momentum, case_res["spike"])
 
                 if case_change > THRESHOLD and avg_skin_change < 0.05:
+                    buy_signals[case] = {
+                        "timestamp": asyncio.get_event_loop().time(),
+                        "initial_price": case_res["current"]
+                    }
+                    
                     await channel.send(
                         f"{priority} BUY OPPORTUNITY\n{case}\nCase: +{round(case_change*100,2)}%\nSkinek nem követik!"
                     )
