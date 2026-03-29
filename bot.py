@@ -18,7 +18,8 @@ ALL_CASES = list(CASE_SKINS.keys())
 # -----------------------------
 # CONFIG
 # -----------------------------
-TOKEN = "MTQ4NzUwNTM1OTE1NjU0Nzc5NA.GYJsiS.SiUqvGLDntlEXQITi2hbI22HVQ2D2f_og21Frg"
+import os
+TOKEN = os.getenv("MTQ4NzUwNTM1OTE1NjU0Nzc5NA.GY2K_D.zqohOs_J3m8ZPQQLe5CQyrWVdOyQxKG5Z7zZew")
 CHANNEL_ID = 1487500804532207699
 STEAM_ID = "76561199813237489"
 
