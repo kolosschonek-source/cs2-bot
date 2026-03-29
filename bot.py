@@ -111,7 +111,9 @@ def analyze(prices):
 def get_inventory():
     url = f"https://steamcommunity.com/inventory/{STEAM_ID}/730/2?l=english&count=5000"
     try:
-        data = requests.get(url).json()
+        res = requests.get(url)
+        data = res.json()
+
         items = set()
 
         for item in data.get("descriptions", []):
@@ -119,7 +121,9 @@ def get_inventory():
                 items.add(item["market_hash_name"])
 
         return list(items)
-    except:
+
+    except Exception as e:
+        print("INVENTORY ERROR:", e)
         return []
 
 def evaluate_performance(item_name, initial_price, prices):
