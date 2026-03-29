@@ -34,7 +34,7 @@ CHANNEL_ID = 1487500804532207699
 STEAM_ID = "76561199813237489"
 
 CHECK_INTERVAL = 300
-THRESHOLD = 0.08
+THRESHOLD = 0.01
 MAX_ITEMS = 15
 
 client = discord.Client(intents=discord.Intents.default())
@@ -249,7 +249,7 @@ async def on_ready():
 
                 priority = get_priority(case_change, case_momentum, case_res["spike"])
 
-                if case_change > THRESHOLD and avg_skin_change < 0.05:
+                if case_change > THRESHOLD and avg_skin_change < 0.10:
                     buy_signals[case] = {
                         "timestamp": asyncio.get_event_loop().time(),
                         "initial_price": case_res["current"]
