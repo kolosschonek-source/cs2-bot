@@ -15,7 +15,7 @@
     "UMP-45 | Roadblock",
     "Sawed-Off | Kiss♥Love",
     "Glock-18 | Winterized"
-  ]
+  ],
   "Spectrum 2 Case": [
     "AK-47 | The Empress",
     "P250 | See Ya Later",
@@ -84,7 +84,7 @@
     "P250 | Valence",
     "CZ75-Auto | Pole Position",
     "UMP-45 | Grand Prix"
-  ]
+  ],
   "CS:GO Weapon Case 3": [
     "AWP | Electric Hive",
     "AK-47 | Jaguar",
@@ -146,7 +146,7 @@
     "Glock-18 | Block-18",
     "P2000 | Lifeline",
     "MP7 | Abyssal Apparition"
-  ]
+  ],
   "Operation Riptide Case": [
     "AK-47 | Leet Museo",
     "Desert Eagle | Ocean Drive",
@@ -204,7 +204,7 @@
     "Desert Eagle | Crimson Web",
     "Glock-18 | Dragon Tattoo",
     "USP-S | Guardian"
-  ]
+  ],
   "Horizon Case": [
     "AK-47 | Neon Rider",
     "Desert Eagle | Code Red",
@@ -266,7 +266,7 @@
     "Desert Eagle | Conspiracy",
     "Galil AR | Tuxedo",
     "FAMAS | Hexane"
-  ]
+  ],
   "Revolver Case": [
     "M4A4 | Royal Paladin",
     "AK-47 | Point Disarray",
@@ -450,6 +450,6 @@
     "Glock-18 | Off World",
     "P250 | Asiimov",
     "MAC-10 | Neon Rider"
-  ]
+  ],
 }
 }
