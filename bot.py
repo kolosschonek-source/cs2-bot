@@ -109,19 +109,56 @@ def analyze(prices):
 # INVENTORY
 # -----------------------------
 def get_inventory():
-    url = f"https://steamcommunity.com/inventory/{STEAM_ID}/730/2?l=english&count=5000"
+    base_url = f"https://steamcommunity.com/inventory/{STEAM_ID}/730/2?l=english&count=5000"
+
+    items = set()
+    cursor = None
+
     try:
-        res = requests.get(url)
+        while True:
+            url = base_url
+            if cursor:
+                url += f"&start_assetid={cursor}"
 
-        print("STATUS:", res.status_code)
-        print("TEXT START:", res.text[:300])
+            res = requests.get(url, timeout=10)
 
-        return []
+            if res.status_code != 200:
+                print("HTTP ERROR:", res.status_code)
+                break
+
+            data = res.json()
+
+            descriptions = data.get("descriptions", [])
+            assets = data.get("assets", [])
+
+            # mapping: classid + instanceid
+            desc_map = {}
+            for d in descriptions:
+                key = f"{d.get('classid')}_{d.get('instanceid')}"
+                desc_map[key] = d
+
+            for asset in assets:
+                key = f"{asset.get('classid')}_{asset.get('instanceid')}"
+                if key in desc_map:
+                    item = desc_map[key]
+                    name = item.get("market_hash_name")
+                    if name:
+                        items.add(name)
+
+            # pagination
+            more = data.get("more_items", False)
+            cursor = data.get("last_assetid")
+
+            if not more or not cursor:
+                break
+
+        print("TOTAL INVENTORY ITEMS:", len(items))
+        return list(items)
 
     except Exception as e:
-        print("ERROR:", e)
+        print("INVENTORY ERROR:", e)
         return []
-
+        
 def evaluate_performance(item_name, initial_price, prices):
     if not prices:
         return None
