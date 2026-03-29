@@ -116,9 +116,22 @@ def get_inventory():
 
         items = set()
 
-        for item in data.get("descriptions", []):
-            if "market_hash_name" in item:
-                items.add(item["market_hash_name"])
+        descriptions = data.get("descriptions", [])
+        assets = data.get("assets", [])
+
+        desc_dict = {}
+        for d in descriptions:
+            desc_dict[d["classid"] + "_" + d["instanceid"]] = d
+
+        for asset in assets:
+            key = asset["classid"] + "_" + asset["instanceid"]
+            if key in desc_dict:
+                item = desc_dict[key]
+                if "market_hash_name" in item:
+                    items.add(item["market_hash_name"])
+
+        print("RAW ASSETS:", len(assets))
+        print("RAW DESCRIPTIONS:", len(descriptions))
 
         return list(items)
 
