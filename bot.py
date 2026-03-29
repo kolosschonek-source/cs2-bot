@@ -19,7 +19,7 @@ ALL_CASES = list(CASE_SKINS.keys())
 # CONFIG
 # -----------------------------
 import os
-TOKEN = os.getenv("MTQ4NzUwNTM1OTE1NjU0Nzc5NA.GY2K_D.zqohOs_J3m8ZPQQLe5CQyrWVdOyQxKG5Z7zZew")
+TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = 1487500804532207699
 STEAM_ID = "76561199813237489"
 
