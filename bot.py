@@ -1,9 +1,20 @@
+
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import requests
 import discord
 import asyncio
 import numpy as np
 import json
 from collections import defaultdict
+def run_server():
+    port = int(os.getenv("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), BaseHTTPRequestHandler)
+    server.serve_forever()
+
+
+threading.Thread(target=run_server).start()
 
 # -----------------------------
 # JSON LOAD
