@@ -34,7 +34,7 @@ CHANNEL_ID = 1487500804532207699
 STEAM_ID = "76561199813237489"
 
 CHECK_INTERVAL = 300
-THRESHOLD = 0.10
+THRESHOLD = 0.08
 MAX_ITEMS = 15
 
 client = discord.Client(intents=discord.Intents.default())
