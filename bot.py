@@ -8,10 +8,10 @@ import asyncio
 import numpy as np
 import json
 from collections import defaultdict
-import certifi
+from concurrent.futures import ThreadPoolExecutor
 
 # -----------------------------
-# HTTP SZERVER (Render életben tartásához)
+# HTTP SZERVER (Render + UptimeRobot)
 # -----------------------------
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -20,7 +20,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"OK")
 
     def log_message(self, format, *args):
-        pass  # Ne logoljon minden pinget
+        pass
 
 def run_server():
     port = int(os.getenv("PORT", 10000))
@@ -46,44 +46,45 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = 1487500804532207699
 STEAM_ID = "76561199813237489"
 
-CHECK_INTERVAL = 300       # 5 percenként fut egy teljes ciklus
-THRESHOLD = 0.10           # 10% változás kell vételhez
-MAX_CASES = 15             # Hány ládát elemezzen egyszerre
-REQUEST_DELAY = 2.5        # Másodperc delay minden Steam kérés között
+CHECK_INTERVAL = 300
+THRESHOLD = 0.10
+MAX_CASES = 15
+REQUEST_DELAY = 2.5
+
+# ThreadPool - ez a kulcs! Külön szálon futnak az API hívások
+executor = ThreadPoolExecutor(max_workers=1)
 
 client = discord.Client(intents=discord.Intents.default())
 
 # -----------------------------
-# PROFIT TRACKING
+# TRACKING
 # -----------------------------
 profit_log = defaultdict(list)
 last_heartbeat = 0
 buy_signals = {}
 previous_prices = {}
 
-# -----------------------------
-# SSL SESSION (certifi tanúsítvánnyal - Render kompatibilis)
-# -----------------------------
-session = requests.Session()
-session.verify = certifi.where()
-session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36"
-})
+price_cache = {}
+cache_timestamp = {}
+CACHE_TTL = 240
 
 # -----------------------------
-# STEAM ÁRLEKÉRÉS - BLOKKOLÓ (külön szálon fut majd)
+# STEAM API
 # -----------------------------
-def _fetch_price_blocking(name):
-    """Ez a függvény blokkoló - mindig run_in_executor-ral hívd meg!"""
+def _fetch_price_sync(name):
+    """Szinkron - threadben fut, NEM blokkolja a Discordot."""
     url = "https://steamcommunity.com/market/priceoverview/"
     params = {
         "appid": 730,
-        "currency": 3,  # EUR
+        "currency": 3,
         "market_hash_name": name
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36"
     }
     try:
         time.sleep(REQUEST_DELAY)
-        res = session.get(url, params=params, timeout=15)
+        res = requests.get(url, params=params, headers=headers, timeout=15)
 
         if res.status_code == 429:
             print(f"RATE LIMIT: {name}, várok 30mp-t...")
@@ -102,28 +103,21 @@ def _fetch_price_blocking(name):
         if not raw:
             return None
 
-        cleaned = raw.replace("€", "").replace("$", "").replace(",", ".").strip()
+        cleaned = raw.replace("€", "").replace("$", "").replace("\xa0", "").replace(",", ".").strip()
         return float(cleaned)
 
     except Exception as e:
         print(f"ÁR HIBA ({name}): {e}")
         return None
 
-# -----------------------------
-# CACHE
-# -----------------------------
-price_cache = {}
-cache_timestamp = {}
-CACHE_TTL = 240  # 4 perc
 
-async def get_price_async(name, loop):
-    """Async wrapper - nem blokkolja a Discord kapcsolatot!"""
+async def get_price_cached(name):
     now = time.time()
     if name in price_cache and (now - cache_timestamp.get(name, 0)) < CACHE_TTL:
         return price_cache[name]
 
-    # Külön szálon futtatjuk a blokkoló hívást
-    price = await loop.run_in_executor(None, _fetch_price_blocking, name)
+    loop = asyncio.get_event_loop()
+    price = await loop.run_in_executor(executor, _fetch_price_sync, name)
 
     if price is not None:
         price_cache[name] = price
@@ -131,15 +125,15 @@ async def get_price_async(name, loop):
 
     return price
 
-async def get_price_change_async(name, loop):
-    """Visszaadja az aktuális árat és a változást."""
-    current = await get_price_async(name, loop)
+
+async def get_price_change(name):
+    current = await get_price_cached(name)
     if current is None:
         return None, None
 
     if name not in previous_prices:
         previous_prices[name] = current
-        return current, None  # Első mérés
+        return current, None
 
     prev = previous_prices[name]
     change = (current - prev) / prev
@@ -148,10 +142,14 @@ async def get_price_change_async(name, loop):
     return current, change
 
 # -----------------------------
-# INVENTORY LEKÉRÉS - BLOKKOLÓ
+# INVENTORY
 # -----------------------------
-def _fetch_inventory_blocking():
+def _fetch_inventory_sync():
     url = f"https://steamcommunity.com/inventory/{STEAM_ID}/730/2?l=english&count=5000"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36",
+        "Accept": "application/json",
+    }
     items = set()
     cursor = None
 
@@ -162,7 +160,7 @@ def _fetch_inventory_blocking():
                 final_url += f"&start_assetid={cursor}"
 
             time.sleep(REQUEST_DELAY)
-            res = session.get(final_url, timeout=15)
+            res = requests.get(final_url, headers=headers, timeout=15)
 
             if res.status_code != 200:
                 print(f"INVENTORY HTTP HIBA: {res.status_code}")
@@ -194,6 +192,11 @@ def _fetch_inventory_blocking():
         print(f"INVENTORY HIBA: {e}")
         return []
 
+
+async def get_inventory():
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(executor, _fetch_inventory_sync)
+
 # -----------------------------
 # PRIORITÁS
 # -----------------------------
@@ -208,10 +211,11 @@ def get_priority(change):
 # -----------------------------
 # PERFORMANCE TRACKING
 # -----------------------------
-async def check_performance(channel, current_time, loop):
-    for item, data in list(buy_signals.items()):
+async def check_performance(channel, current_time):
+    for item in list(buy_signals.keys()):
+        data = buy_signals[item]
         elapsed = current_time - data["timestamp"]
-        current_price = await get_price_async(item, loop)
+        current_price = await get_price_cached(item)
 
         if current_price is None:
             continue
@@ -223,8 +227,8 @@ async def check_performance(channel, current_time, loop):
             buy_signals[item]["reported_24h"] = True
             await channel.send(
                 f"📊 **24H PERFORMANCE**\n`{item}`\n"
-                f"Kezdeti: {round(initial, 2)}€ → Most: {round(current_price, 2)}€\n"
-                f"Változás: {round(change * 100, 2)}%"
+                f"Kezdeti: {round(initial,2)}€ → Most: {round(current_price,2)}€\n"
+                f"Változás: {round(change*100,2)}%"
             )
             del buy_signals[item]
 
@@ -232,16 +236,16 @@ async def check_performance(channel, current_time, loop):
             buy_signals[item]["reported_6h"] = True
             await channel.send(
                 f"📊 **6H PERFORMANCE**\n`{item}`\n"
-                f"Kezdeti: {round(initial, 2)}€ → Most: {round(current_price, 2)}€\n"
-                f"Változás: {round(change * 100, 2)}%"
+                f"Kezdeti: {round(initial,2)}€ → Most: {round(current_price,2)}€\n"
+                f"Változás: {round(change*100,2)}%"
             )
 
         elif elapsed > 3600 and not data.get("reported_1h"):
             buy_signals[item]["reported_1h"] = True
             await channel.send(
                 f"📊 **1H PERFORMANCE**\n`{item}`\n"
-                f"Kezdeti: {round(initial, 2)}€ → Most: {round(current_price, 2)}€\n"
-                f"Változás: {round(change * 100, 2)}%"
+                f"Kezdeti: {round(initial,2)}€ → Most: {round(current_price,2)}€\n"
+                f"Változás: {round(change*100,2)}%"
             )
 
 # -----------------------------
@@ -253,50 +257,38 @@ async def on_ready():
     channel = await client.fetch_channel(CHANNEL_ID)
     await channel.send("✅ **Bot online és működik!**")
 
-    loop = asyncio.get_event_loop()
     global last_heartbeat
 
     while True:
         try:
-            current_time = loop.time()
+            current_time = asyncio.get_event_loop().time()
             print("--- ÚJ CIKLUS ---")
 
-            # Heartbeat
             if current_time - last_heartbeat > 3600:
                 await channel.send("💓 Bot még online és figyel!")
                 last_heartbeat = current_time
 
-            # Performance visszajelzések
-            await check_performance(channel, current_time, loop)
+            await check_performance(channel, current_time)
 
-            # -------- INVENTORY --------
-            inventory = await loop.run_in_executor(None, _fetch_inventory_blocking)
+            # INVENTORY
+            inventory = await get_inventory()
             await channel.send(f"📦 Inventory: **{len(inventory)} item** lekérve")
 
-            sell_alerts = []
             for item in inventory:
-                current_price, change = await get_price_change_async(item, loop)
+                current_price, change = await get_price_change(item)
                 if change is None:
                     continue
                 if change > THRESHOLD:
                     priority = get_priority(change)
-                    sell_alerts.append(
-                        f"{priority} **SELL ALERT**: `{item}`\n"
-                        f"Ár: {round(current_price, 2)}€ | +{round(change * 100, 2)}%"
+                    await channel.send(
+                        f"{priority} **SELL ALERT**\n`{item}`\n"
+                        f"Ár: {round(current_price,2)}€ | +{round(change*100,2)}%"
                     )
                     profit_log[item].append(change)
 
-            if sell_alerts:
-                for alert in sell_alerts:
-                    await channel.send(alert)
-            else:
-                print("Nincs sell alert.")
-
-            # -------- LÁDA ELEMZÉS --------
-            cases_to_check = ALL_CASES[:MAX_CASES]
-
-            for case in cases_to_check:
-                case_price, case_change = await get_price_change_async(case, loop)
+            # LÁDA ELEMZÉS
+            for case in ALL_CASES[:MAX_CASES]:
+                case_price, case_change = await get_price_change(case)
                 if case_change is None:
                     continue
 
@@ -304,7 +296,7 @@ async def on_ready():
                 skin_changes = []
 
                 for skin in skins[:8]:
-                    _, skin_change = await get_price_change_async(skin, loop)
+                    _, skin_change = await get_price_change(skin)
                     if skin_change is not None:
                         skin_changes.append(skin_change)
 
@@ -322,8 +314,8 @@ async def on_ready():
                         }
                     await channel.send(
                         f"{priority} **BUY OPPORTUNITY**\n`{case}`\n"
-                        f"Láda: {round(case_price, 2)}€ (+{round(case_change * 100, 2)}%)\n"
-                        f"Skinek átlag: {round(avg_skin_change * 100, 2)}% → Nem követik!"
+                        f"Láda: {round(case_price,2)}€ (+{round(case_change*100,2)}%)\n"
+                        f"Skinek átlag: {round(avg_skin_change*100,2)}% → Nem követik!"
                     )
 
             print(f"Ciklus kész. Várok {CHECK_INTERVAL}mp-t...")
