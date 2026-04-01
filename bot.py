@@ -19,6 +19,10 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"OK")
 
+    def do_HEAD(self):  # Ezt add hozzá!
+        self.send_response(200)
+        self.end_headers()
+
     def log_message(self, format, *args):
         pass
 
