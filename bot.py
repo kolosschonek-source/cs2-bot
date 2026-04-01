@@ -42,211 +42,238 @@ ALL_CASES = list(CASE_SKINS.keys())
 # -----------------------------
 # CONFIG
 # -----------------------------
-TOKEN = os.getenv("DISCORD_TOKEN")
-CHANNEL_ID = 1487500804532207699
-STEAM_ID = "76561199813237489"
+TOKEN             = os.getenv("DISCORD_TOKEN")
+CSFLOAT_API_KEY   = os.getenv("CSFLOAT_API_KEY")
+CHANNEL_ID        = 1487500804532207699
 
-CHECK_INTERVAL = 300
-THRESHOLD = 0.10
-MAX_CASES = 15
-REQUEST_DELAY = 2.5
+CHECK_INTERVAL    = 600    # 10 perc ciklusonként
+REQUEST_DELAY     = 1.5    # Delay kérések között
+CACHE_TTL         = 300    # 5 perc cache
 
-# ThreadPool - ez a kulcs! Külön szálon futnak az API hívások
-executor = ThreadPoolExecutor(max_workers=1)
+# Küszöbök
+CASE_RISE_THRESHOLD  = 0.08   # 8%+ láda árnövekedés
+SKIN_FOLLOW_MAX      = 0.03   # Skinek max 3% növekedés
+SELL_THRESHOLD       = 0.12   # 12%+ = sell alert
 
-client = discord.Client(intents=discord.Intents.default())
+MAX_CASES            = 15
+MAX_SKINS_PER_CASE   = 8
+
+executor = ThreadPoolExecutor(max_workers=2)
+client   = discord.Client(intents=discord.Intents.default())
 
 # -----------------------------
 # TRACKING
 # -----------------------------
-profit_log = defaultdict(list)
-last_heartbeat = 0
-buy_signals = {}
+profit_log      = defaultdict(list)
+last_heartbeat  = 0
+buy_signals     = {}
 previous_prices = {}
-
-price_cache = {}
-cache_timestamp = {}
-CACHE_TTL = 240
+price_cache     = {}
+cache_ts        = {}
 
 # -----------------------------
-# STEAM API
+# CSFLOAT API
 # -----------------------------
-def _fetch_price_sync(name):
-    """Szinkron - threadben fut, NEM blokkolja a Discordot."""
-    url = "https://steamcommunity.com/market/priceoverview/"
-    params = {
-        "appid": 730,
-        "currency": 3,
-        "market_hash_name": name
-    }
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36"
-    }
+CSFLOAT_BASE = "https://csfloat.com/api/v1"
+
+def _csfloat_headers():
+    return {"Authorization": CSFLOAT_API_KEY, "Content-Type": "application/json"}
+
+
+def _fetch_price_sync(market_hash_name):
+    """Legolcsóbb aktív CSFloat listing ára."""
     try:
         time.sleep(REQUEST_DELAY)
-        res = requests.get(url, params=params, headers=headers, timeout=15)
+        url = f"{CSFLOAT_BASE}/listings"
+        params = {
+            "market_hash_name": market_hash_name,
+            "sort_by": "price",
+            "order": "asc",
+            "limit": 5,
+            "category": 0
+        }
+        res = requests.get(url, headers=_csfloat_headers(), params=params, timeout=15)
 
         if res.status_code == 429:
-            print(f"RATE LIMIT: {name}, várok 30mp-t...")
-            time.sleep(30)
+            print(f"RATE LIMIT: {market_hash_name}, várok 60mp-t...")
+            time.sleep(60)
             return None
-
+        if res.status_code == 401:
+            print("HIBÁS API KULCS!")
+            return None
         if res.status_code != 200:
-            print(f"HTTP HIBA {res.status_code}: {name}")
+            print(f"HTTP HIBA {res.status_code}: {market_hash_name}")
             return None
 
-        data = res.json()
-        if not data.get("success"):
+        listings = res.json().get("data", [])
+        if not listings:
             return None
 
-        raw = data.get("lowest_price") or data.get("median_price")
-        if not raw:
-            return None
-
-        cleaned = raw.replace("€", "").replace("$", "").replace("\xa0", "").replace(",", ".").strip()
-        return float(cleaned)
+        price_cents = listings[0].get("price")
+        return round(price_cents / 100, 2) if price_cents else None
 
     except Exception as e:
-        print(f"ÁR HIBA ({name}): {e}")
+        print(f"ÁR HIBA ({market_hash_name}): {e}")
         return None
 
 
-async def get_price_cached(name):
-    now = time.time()
-    if name in price_cache and (now - cache_timestamp.get(name, 0)) < CACHE_TTL:
-        return price_cache[name]
-
-    loop = asyncio.get_event_loop()
-    price = await loop.run_in_executor(executor, _fetch_price_sync, name)
-
-    if price is not None:
-        price_cache[name] = price
-        cache_timestamp[name] = now
-
-    return price
-
-
-async def get_price_change(name):
-    current = await get_price_cached(name)
-    if current is None:
-        return None, None
-
-    if name not in previous_prices:
-        previous_prices[name] = current
-        return current, None
-
-    prev = previous_prices[name]
-    change = (current - prev) / prev
-    previous_prices[name] = current
-
-    return current, change
-
-# -----------------------------
-# INVENTORY
-# -----------------------------
-def _fetch_inventory_sync():
-    url = f"https://steamcommunity.com/inventory/{STEAM_ID}/730/2?l=english&count=5000"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36",
-        "Accept": "application/json",
-    }
-    items = set()
-    cursor = None
-
+def _fetch_price_history_sync(market_hash_name):
+    """CSFloat ártörténet - EUR árak listája."""
     try:
-        while True:
-            final_url = url
-            if cursor:
-                final_url += f"&start_assetid={cursor}"
+        time.sleep(REQUEST_DELAY)
+        url = f"{CSFLOAT_BASE}/market/price-history"
+        params = {"market_hash_name": market_hash_name}
+        res = requests.get(url, headers=_csfloat_headers(), params=params, timeout=15)
 
-            time.sleep(REQUEST_DELAY)
-            res = requests.get(final_url, headers=headers, timeout=15)
+        if res.status_code == 429:
+            print(f"RATE LIMIT (history): {market_hash_name}, várok 60mp-t...")
+            time.sleep(60)
+            return []
+        if res.status_code != 200:
+            return []
 
-            if res.status_code != 200:
-                print(f"INVENTORY HTTP HIBA: {res.status_code}")
-                break
-
-            data = res.json()
-
-            desc_map = {}
-            for d in data.get("descriptions", []):
-                key = f"{d.get('classid')}_{d.get('instanceid')}"
-                desc_map[key] = d
-
-            for asset in data.get("assets", []):
-                key = f"{asset.get('classid')}_{asset.get('instanceid')}"
-                if key in desc_map:
-                    name = desc_map[key].get("market_hash_name")
-                    if name:
-                        items.add(name)
-
-            if not data.get("more_items"):
-                break
-
-            cursor = data.get("last_assetid")
-
-        print(f"INVENTORY: {len(items)} item")
-        return list(items)
+        entries = res.json().get("data", [])
+        return [round(e["price"] / 100, 2) for e in entries if "price" in e]
 
     except Exception as e:
-        print(f"INVENTORY HIBA: {e}")
+        print(f"ÁR TÖRTÉNET HIBA ({market_hash_name}): {e}")
         return []
 
 
-async def get_inventory():
+# -----------------------------
+# TECHNIKAI ELEMZÉS
+# -----------------------------
+def analyze_trend(prices):
+    """Trend elemzés árlista alapján."""
+    if len(prices) < 3:
+        return None
+
+    prices = np.array(prices)
+    current = prices[-1]
+
+    change_1d = (current - prices[-2]) / prices[-2] if len(prices) >= 2 else 0
+    change_7d = (current - prices[-7]) / prices[-7] if len(prices) >= 7 else (current - prices[0]) / prices[0]
+
+    short_avg = np.mean(prices[-3:])
+    long_avg  = np.mean(prices[-min(14, len(prices)):])
+    momentum  = (short_avg - long_avg) / long_avg if long_avg > 0 else 0
+    slope     = np.polyfit(np.arange(len(prices)), prices, 1)[0]
+    spike     = change_1d > 0.15 or momentum > 0.12
+
+    return {
+        "current":   current,
+        "change_1d": change_1d,
+        "change_7d": change_7d,
+        "momentum":  momentum,
+        "slope":     slope,
+        "spike":     spike
+    }
+
+
+def score_buy_opportunity(case_a, avg_skin_a):
+    """
+    Vételi lehetőség pontozása 0-100.
+    A láda emelkedik, de a skinek még nem követik = jó vétel.
+    """
+    score = 0
+    if case_a["change_1d"] > 0.05:  score += 20
+    if case_a["change_7d"] > 0.08:  score += 20
+    if case_a["momentum"]  > 0.05:  score += 15
+    if case_a["slope"]     > 0:     score += 10
+    if avg_skin_a["change_1d"] < 0.02: score += 20
+    if avg_skin_a["change_7d"] < 0.03: score += 15
+    return score
+
+
+# -----------------------------
+# CACHE + ASYNC WRAPPEREK
+# -----------------------------
+async def get_price(name):
+    now = time.time()
+    if name in price_cache and (now - cache_ts.get(name, 0)) < CACHE_TTL:
+        return price_cache[name]
+    loop  = asyncio.get_event_loop()
+    price = await loop.run_in_executor(executor, _fetch_price_sync, name)
+    if price is not None:
+        price_cache[name] = price
+        cache_ts[name]    = now
+    return price
+
+
+async def get_price_history(name):
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(executor, _fetch_inventory_sync)
+    return await loop.run_in_executor(executor, _fetch_price_history_sync, name)
+
+
+async def get_price_change(name):
+    current = await get_price(name)
+    if current is None:
+        return None, None
+    if name not in previous_prices:
+        previous_prices[name] = current
+        return current, None
+    prev   = previous_prices[name]
+    change = (current - prev) / prev
+    previous_prices[name] = current
+    return current, change
+
 
 # -----------------------------
 # PRIORITÁS
 # -----------------------------
-def get_priority(change):
-    if change >= 0.25:
-        return "🔥 HIGH"
-    elif change >= 0.15:
-        return "⚡ MEDIUM"
-    else:
-        return "ℹ️ LOW"
+def get_priority(score):
+    if score >= 75: return "🔥 ERŐS VÉTEL"
+    elif score >= 50: return "⚡ KÖZEPES VÉTEL"
+    else: return "ℹ️ GYENGE VÉTEL"
+
+def get_sell_priority(change):
+    if change >= 0.25: return "🔥 AZONNALI ELADÁS"
+    elif change >= 0.15: return "⚡ ÉRDEMES ELADNI"
+    else: return "ℹ️ FIGYELJ RÁ"
+
 
 # -----------------------------
 # PERFORMANCE TRACKING
 # -----------------------------
 async def check_performance(channel, current_time):
     for item in list(buy_signals.keys()):
-        data = buy_signals[item]
+        data    = buy_signals[item]
         elapsed = current_time - data["timestamp"]
-        current_price = await get_price_cached(item)
+        current_price = await get_price(item)
 
         if current_price is None:
             continue
 
         initial = data["initial_price"]
-        change = (current_price - initial) / initial
+        change  = (current_price - initial) / initial
+        emoji   = "📈" if change > 0 else "📉"
+        sign    = "+" if change > 0 else ""
 
         if elapsed > 86400 and not data.get("reported_24h"):
             buy_signals[item]["reported_24h"] = True
             await channel.send(
-                f"📊 **24H PERFORMANCE**\n`{item}`\n"
-                f"Kezdeti: {round(initial,2)}€ → Most: {round(current_price,2)}€\n"
-                f"Változás: {round(change*100,2)}%"
+                f"📊 **24H VISSZAJELZÉS** {emoji}\n`{item}`\n"
+                f"Vétel: {round(initial,2)}€ → Most: {round(current_price,2)}€\n"
+                f"Eredmény: {sign}{round(change*100,2)}%"
             )
             del buy_signals[item]
 
         elif elapsed > 21600 and not data.get("reported_6h"):
             buy_signals[item]["reported_6h"] = True
             await channel.send(
-                f"📊 **6H PERFORMANCE**\n`{item}`\n"
-                f"Kezdeti: {round(initial,2)}€ → Most: {round(current_price,2)}€\n"
-                f"Változás: {round(change*100,2)}%"
+                f"📊 **6H VISSZAJELZÉS** {emoji}\n`{item}`\n"
+                f"Vétel: {round(initial,2)}€ → Most: {round(current_price,2)}€\n"
+                f"Változás: {sign}{round(change*100,2)}%"
             )
 
         elif elapsed > 3600 and not data.get("reported_1h"):
             buy_signals[item]["reported_1h"] = True
             await channel.send(
-                f"📊 **1H PERFORMANCE**\n`{item}`\n"
-                f"Kezdeti: {round(initial,2)}€ → Most: {round(current_price,2)}€\n"
-                f"Változás: {round(change*100,2)}%"
+                f"📊 **1H VISSZAJELZÉS** {emoji}\n`{item}`\n"
+                f"Vétel: {round(initial,2)}€ → Most: {round(current_price,2)}€\n"
+                f"Változás: {sign}{round(change*100,2)}%"
             )
+
 
 # -----------------------------
 # FŐ BOT LOGIKA
@@ -255,7 +282,11 @@ async def check_performance(channel, current_time):
 async def on_ready():
     print("Bot elindult!")
     channel = await client.fetch_channel(CHANNEL_ID)
-    await channel.send("✅ **Bot online és működik!**")
+    await channel.send(
+        "✅ **CS2 Trading Bot online!**\n"
+        "📡 CSFloat API kapcsolódva\n"
+        f"🔍 {len(ALL_CASES)} láda figyelése aktív"
+    )
 
     global last_heartbeat
 
@@ -264,59 +295,100 @@ async def on_ready():
             current_time = asyncio.get_event_loop().time()
             print("--- ÚJ CIKLUS ---")
 
+            # Heartbeat óránként
             if current_time - last_heartbeat > 3600:
-                await channel.send("💓 Bot még online és figyel!")
+                await channel.send("💓 Bot online és figyel!")
                 last_heartbeat = current_time
 
+            # Performance visszajelzések
             await check_performance(channel, current_time)
 
-            # INVENTORY
-            inventory = await get_inventory()
-            await channel.send(f"📦 Inventory: **{len(inventory)} item** lekérve")
+            buy_alerts  = []
+            sell_alerts = []
 
-            for item in inventory:
-                current_price, change = await get_price_change(item)
-                if change is None:
-                    continue
-                if change > THRESHOLD:
-                    priority = get_priority(change)
-                    await channel.send(
-                        f"{priority} **SELL ALERT**\n`{item}`\n"
-                        f"Ár: {round(current_price,2)}€ | +{round(change*100,2)}%"
-                    )
-                    profit_log[item].append(change)
-
-            # LÁDA ELEMZÉS
             for case in ALL_CASES[:MAX_CASES]:
-                case_price, case_change = await get_price_change(case)
-                if case_change is None:
+                # Láda ártörténet
+                case_history  = await get_price_history(case)
+                case_analysis = analyze_trend(case_history)
+
+                if not case_analysis:
+                    print(f"Nincs elég adat: {case}")
                     continue
 
-                skins = CASE_SKINS.get(case, [])
-                skin_changes = []
+                case_price = case_analysis["current"]
+                print(
+                    f"Láda: {case} | {case_price}€ | "
+                    f"1d: {round(case_analysis['change_1d']*100,1)}% | "
+                    f"7d: {round(case_analysis['change_7d']*100,1)}%"
+                )
 
-                for skin in skins[:8]:
-                    _, skin_change = await get_price_change(skin)
-                    if skin_change is not None:
-                        skin_changes.append(skin_change)
+                # Live sell alert a ládára
+                _, case_live_change = await get_price_change(case)
+                if case_live_change is not None and case_live_change >= SELL_THRESHOLD:
+                    sell_alerts.append(
+                        f"{get_sell_priority(case_live_change)} **LÁDA SELL**\n`{case}`\n"
+                        f"Ár: {case_price}€ | +{round(case_live_change*100,2)}%"
+                    )
 
-                if not skin_changes:
+                # Skinek elemzése
+                skins         = CASE_SKINS.get(case, [])
+                skin_analyses = []
+
+                for skin in skins[:MAX_SKINS_PER_CASE]:
+                    history  = await get_price_history(skin)
+                    analysis = analyze_trend(history)
+                    if analysis:
+                        skin_analyses.append((skin, analysis))
+
+                        # Skin sell alert
+                        _, skin_live = await get_price_change(skin)
+                        if skin_live is not None and skin_live >= SELL_THRESHOLD:
+                            sell_alerts.append(
+                                f"{get_sell_priority(skin_live)} **SKIN SELL**\n`{skin}`\n"
+                                f"Ár: {analysis['current']}€ | +{round(skin_live*100,2)}%"
+                            )
+
+                if not skin_analyses:
                     continue
 
-                avg_skin_change = np.mean(skin_changes)
+                avg_skin = {
+                    "change_1d": np.mean([a["change_1d"] for _, a in skin_analyses]),
+                    "change_7d": np.mean([a["change_7d"] for _, a in skin_analyses]),
+                }
 
-                if case_change >= THRESHOLD and avg_skin_change < 0.03:
-                    priority = get_priority(case_change)
+                # Vétel pontozás
+                score = score_buy_opportunity(case_analysis, avg_skin)
+
+                if (
+                    (case_analysis["change_1d"] >= CASE_RISE_THRESHOLD or
+                     case_analysis["change_7d"] >= CASE_RISE_THRESHOLD) and
+                    avg_skin["change_1d"] < SKIN_FOLLOW_MAX and
+                    score >= 40
+                ):
                     if case not in buy_signals:
                         buy_signals[case] = {
-                            "timestamp": current_time,
+                            "timestamp":     current_time,
                             "initial_price": case_price,
                         }
-                    await channel.send(
-                        f"{priority} **BUY OPPORTUNITY**\n`{case}`\n"
-                        f"Láda: {round(case_price,2)}€ (+{round(case_change*100,2)}%)\n"
-                        f"Skinek átlag: {round(avg_skin_change*100,2)}% → Nem követik!"
-                    )
+                    buy_alerts.append((score, case, case_price, case_analysis, avg_skin))
+
+            # Sell alertek
+            for alert in sell_alerts:
+                await channel.send(alert)
+
+            # Vétel alertek - legjobb először
+            buy_alerts.sort(key=lambda x: x[0], reverse=True)
+            for score, case, price, ca, sa in buy_alerts:
+                await channel.send(
+                    f"{get_priority(score)}\n`{case}`\n"
+                    f"💰 Ár: **{price}€**\n"
+                    f"📈 Láda: 1 nap +{round(ca['change_1d']*100,1)}% | 7 nap +{round(ca['change_7d']*100,1)}%\n"
+                    f"📉 Skinek: 1 nap {round(sa['change_1d']*100,1)}% | 7 nap {round(sa['change_7d']*100,1)}%\n"
+                    f"⭐ Pontszám: {score}/100"
+                )
+
+            if not sell_alerts and not buy_alerts:
+                print("Nincs alert ebben a ciklusban.")
 
             print(f"Ciklus kész. Várok {CHECK_INTERVAL}mp-t...")
             await asyncio.sleep(CHECK_INTERVAL)
