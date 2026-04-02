@@ -55,9 +55,9 @@ REQUEST_DELAY     = 1.5    # Delay kérések között
 CACHE_TTL         = 300    # 5 perc cache
 
 # Küszöbök
-CASE_RISE_THRESHOLD  = 0.08   # 8%+ láda árnövekedés
-SKIN_FOLLOW_MAX      = 0.03   # Skinek max 3% növekedés
-SELL_THRESHOLD       = 0.12   # 12%+ = sell alert
+CASE_RISE_THRESHOLD  = 0.001  # 8%+ láda árnövekedés
+SKIN_FOLLOW_MAX      = 0.99   # Skinek max 3% növekedés
+SELL_THRESHOLD       = 0.001   # 12%+ = sell alert
 
 MAX_CASES            = 15
 MAX_SKINS_PER_CASE   = 8
