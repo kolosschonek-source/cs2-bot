@@ -10,11 +10,11 @@ import json
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
-# —————————–
+# ———————––
 
 # HTTP SZERVER (Render + UptimeRobot)
 
-# —————————–
+# ———————––
 
 class HealthHandler(BaseHTTPRequestHandler):
 def do_GET(self):
@@ -38,11 +38,11 @@ server.serve_forever()
 
 threading.Thread(target=run_server, daemon=True).start()
 
-# —————————–
+# ———————––
 
-# JSON BETÖLTÉS
+# JSON BETOLTES
 
-# —————————–
+# ———————––
 
 def load_cases():
 with open(“cases.json”, “r”, encoding=“utf-8”) as f:
@@ -51,11 +51,11 @@ return json.load(f)
 CASE_SKINS = load_cases()
 ALL_CASES  = list(CASE_SKINS.keys())
 
-# —————————–
+# ———————––
 
 # CONFIG
 
-# —————————–
+# ———————––
 
 TOKEN           = os.getenv(“DISCORD_TOKEN”)
 CSFLOAT_API_KEY = os.getenv(“CSFLOAT_API_KEY”)
@@ -65,9 +65,9 @@ CHECK_INTERVAL       = 600    # 10 perc
 REQUEST_DELAY        = 1.5
 CACHE_TTL            = 300    # 5 perc
 
-CASE_RISE_THRESHOLD  = 0.001  # TESZT: 0.1% - visszaállítani 0.08-ra élesben!
-SKIN_FOLLOW_MAX      = 0.99   # TESZT - visszaállítani 0.03-ra élesben!
-SELL_THRESHOLD       = 0.001  # TESZT: 0.1% - visszaállítani 0.12-re élesben!
+CASE_RISE_THRESHOLD  = 0.001  # TESZT: 0.1% - visszaallitani 0.08-ra elesben!
+SKIN_FOLLOW_MAX      = 0.99   # TESZT - visszaallitani 0.03-ra elesben!
+SELL_THRESHOLD       = 0.001  # TESZT: 0.1% - visszaallitani 0.12-re elesben!
 
 MAX_CASES          = 15
 MAX_SKINS_PER_CASE = 8
@@ -75,11 +75,11 @@ MAX_SKINS_PER_CASE = 8
 executor = ThreadPoolExecutor(max_workers=2)
 client   = discord.Client(intents=discord.Intents.default())
 
-# —————————–
+# ———————––
 
 # TRACKING
 
-# —————————–
+# ———————––
 
 profit_log      = defaultdict(list)
 last_heartbeat  = 0
@@ -87,13 +87,13 @@ buy_signals     = {}
 previous_prices = {}
 price_cache     = {}
 cache_ts        = {}
-loop_started    = False  # Megakadályozza hogy kétszer induljon a ciklus
+loop_started    = False
 
-# —————————–
+# ———————––
 
 # CSFLOAT API
 
-# —————————–
+# ———————––
 
 CSFLOAT_BASE = “https://csfloat.com/api/v1”
 
@@ -115,11 +115,11 @@ res = requests.get(url, headers=_csfloat_headers(), params=params, timeout=15)
 
 ```
     if res.status_code == 429:
-        print(f"RATE LIMIT: {market_hash_name}, várok 60mp-t...")
+        print(f"RATE LIMIT: {market_hash_name}, varok 60mp-t...")
         time.sleep(60)
         return None
     if res.status_code == 401:
-        print("HIBÁS API KULCS!")
+        print("HIBAS API KULCS!")
         return None
     if res.status_code != 200:
         print(f"HTTP HIBA {res.status_code}: {market_hash_name}")
@@ -133,7 +133,7 @@ res = requests.get(url, headers=_csfloat_headers(), params=params, timeout=15)
     return round(price_cents / 100, 2) if price_cents else None
 
 except Exception as e:
-    print(f"ÁR HIBA ({market_hash_name}): {e}")
+    print(f"AR HIBA ({market_hash_name}): {e}")
     return None
 ```
 
@@ -146,7 +146,7 @@ res = requests.get(url, headers=_csfloat_headers(), params=params, timeout=15)
 
 ```
     if res.status_code == 429:
-        print(f"RATE LIMIT (history): {market_hash_name}, várok 60mp-t...")
+        print(f"RATE LIMIT (history): {market_hash_name}, varok 60mp-t...")
         time.sleep(60)
         return []
     if res.status_code != 200:
@@ -156,15 +156,15 @@ res = requests.get(url, headers=_csfloat_headers(), params=params, timeout=15)
     return [round(e["price"] / 100, 2) for e in entries if "price" in e]
 
 except Exception as e:
-    print(f"ÁR TÖRTÉNET HIBA ({market_hash_name}): {e}")
+    print(f"AR TORTENET HIBA ({market_hash_name}): {e}")
     return []
 ```
 
-# —————————–
+# ———————––
 
-# TECHNIKAI ELEMZÉS
+# TECHNIKAI ELEMZES
 
-# —————————–
+# ———————––
 
 def analyze_trend(prices):
 if len(prices) < 3:
@@ -201,11 +201,11 @@ if avg_skin_a[“change_1d”] < 0.02:    score += 20
 if avg_skin_a[“change_7d”] < 0.03:    score += 15
 return score
 
-# —————————–
+# ———————––
 
 # CACHE + ASYNC WRAPPEREK
 
-# —————————–
+# ———————––
 
 async def get_price(name):
 now = time.time()
@@ -234,27 +234,27 @@ change = (current - prev) / prev
 previous_prices[name] = current
 return current, change
 
-# —————————–
+# ———————––
 
-# PRIORITÁS
+# PRIORITAS
 
-# —————————–
+# ———————––
 
 def get_priority(score):
-if score >= 75:   return “🔥 ERŐS VÉTEL”
-elif score >= 50: return “⚡ KÖZEPES VÉTEL”
-else:             return “ℹ️ GYENGE VÉTEL”
+if score >= 75:   return “EROS VETEL”
+elif score >= 50: return “KOZEPES VETEL”
+else:             return “GYENGE VETEL”
 
 def get_sell_priority(change):
-if change >= 0.25:   return “🔥 AZONNALI ELADÁS”
-elif change >= 0.15: return “⚡ ÉRDEMES ELADNI”
-else:                return “ℹ️ FIGYELJ RÁ”
+if change >= 0.25:   return “AZONNALI ELADAS”
+elif change >= 0.15: return “ERDEMES ELADNI”
+else:                return “FIGYELJ RA”
 
-# —————————–
+# ———————––
 
 # PERFORMANCE TRACKING
 
-# —————————–
+# ———————––
 
 async def check_performance(channel, current_time):
 for item in list(buy_signals.keys()):
@@ -274,34 +274,34 @@ current_price = await get_price(item)
     if elapsed > 86400 and not data.get("reported_24h"):
         buy_signals[item]["reported_24h"] = True
         await channel.send(
-            f"📊 **24H VISSZAJELZÉS** {emoji}\n`{item}`\n"
-            f"Vétel: {round(initial,2)}€ → Most: {round(current_price,2)}€\n"
-            f"Eredmény: {sign}{round(change*100,2)}%"
+            f"📊 **24H VISSZAJELZES** {emoji}\n`{item}`\n"
+            f"Vetel: {round(initial,2)}EUR -> Most: {round(current_price,2)}EUR\n"
+            f"Eredmeny: {sign}{round(change*100,2)}%"
         )
         del buy_signals[item]
 
     elif elapsed > 21600 and not data.get("reported_6h"):
         buy_signals[item]["reported_6h"] = True
         await channel.send(
-            f"📊 **6H VISSZAJELZÉS** {emoji}\n`{item}`\n"
-            f"Vétel: {round(initial,2)}€ → Most: {round(current_price,2)}€\n"
-            f"Változás: {sign}{round(change*100,2)}%"
+            f"📊 **6H VISSZAJELZES** {emoji}\n`{item}`\n"
+            f"Vetel: {round(initial,2)}EUR -> Most: {round(current_price,2)}EUR\n"
+            f"Valtozas: {sign}{round(change*100,2)}%"
         )
 
     elif elapsed > 3600 and not data.get("reported_1h"):
         buy_signals[item]["reported_1h"] = True
         await channel.send(
-            f"📊 **1H VISSZAJELZÉS** {emoji}\n`{item}`\n"
-            f"Vétel: {round(initial,2)}€ → Most: {round(current_price,2)}€\n"
-            f"Változás: {sign}{round(change*100,2)}%"
+            f"📊 **1H VISSZAJELZES** {emoji}\n`{item}`\n"
+            f"Vetel: {round(initial,2)}EUR -> Most: {round(current_price,2)}EUR\n"
+            f"Valtozas: {sign}{round(change*100,2)}%"
         )
 ```
 
-# —————————–
+# ———————––
 
-# FŐ CIKLUS (külön task - RESUME után is fut!)
+# FO CIKLUS
 
-# —————————–
+# ———————––
 
 async def main_loop():
 global last_heartbeat
@@ -310,18 +310,17 @@ global last_heartbeat
 channel = await client.fetch_channel(CHANNEL_ID)
 await channel.send(
     "✅ **CS2 Trading Bot online!**\n"
-    "📡 CSFloat API kapcsolódva\n"
-    f"🔍 {len(ALL_CASES)} láda figyelése aktív"
+    "📡 CSFloat API kapcsolodva\n"
+    f"🔍 {len(ALL_CASES)} lada figyelese aktiv"
 )
 
 while True:
     try:
         current_time = asyncio.get_event_loop().time()
-        print("--- ÚJ CIKLUS ---")
+        print("--- UJ CIKLUS ---")
 
-        # Heartbeat óránként
         if current_time - last_heartbeat > 3600:
-            await channel.send("💓 Bot online és figyel!")
+            await channel.send("💓 Bot online es figyel!")
             last_heartbeat = current_time
 
         await check_performance(channel, current_time)
@@ -334,12 +333,12 @@ while True:
             case_analysis = analyze_trend(case_history)
 
             if not case_analysis:
-                print(f"Nincs elég adat: {case}")
+                print(f"Nincs eleg adat: {case}")
                 continue
 
             case_price = case_analysis["current"]
             print(
-                f"Láda: {case} | {case_price}€ | "
+                f"Lada: {case} | {case_price}EUR | "
                 f"1d: {round(case_analysis['change_1d']*100,1)}% | "
                 f"7d: {round(case_analysis['change_7d']*100,1)}%"
             )
@@ -347,8 +346,8 @@ while True:
             _, case_live_change = await get_price_change(case)
             if case_live_change is not None and case_live_change >= SELL_THRESHOLD:
                 sell_alerts.append(
-                    f"{get_sell_priority(case_live_change)} **LÁDA SELL**\n`{case}`\n"
-                    f"Ár: {case_price}€ | +{round(case_live_change*100,2)}%"
+                    f"{get_sell_priority(case_live_change)} **LADA SELL**\n`{case}`\n"
+                    f"Ar: {case_price}EUR | +{round(case_live_change*100,2)}%"
                 )
 
             skins         = CASE_SKINS.get(case, [])
@@ -363,7 +362,7 @@ while True:
                     if skin_live is not None and skin_live >= SELL_THRESHOLD:
                         sell_alerts.append(
                             f"{get_sell_priority(skin_live)} **SKIN SELL**\n`{skin}`\n"
-                            f"Ár: {analysis['current']}€ | +{round(skin_live*100,2)}%"
+                            f"Ar: {analysis['current']}EUR | +{round(skin_live*100,2)}%"
                         )
 
             if not skin_analyses:
@@ -396,16 +395,16 @@ while True:
         for score, case, price, ca, sa in buy_alerts:
             await channel.send(
                 f"{get_priority(score)}\n`{case}`\n"
-                f"💰 Ár: **{price}€**\n"
-                f"📈 Láda: 1 nap +{round(ca['change_1d']*100,1)}% | 7 nap +{round(ca['change_7d']*100,1)}%\n"
+                f"💰 Ar: **{price}EUR**\n"
+                f"📈 Lada: 1 nap +{round(ca['change_1d']*100,1)}% | 7 nap +{round(ca['change_7d']*100,1)}%\n"
                 f"📉 Skinek: 1 nap {round(sa['change_1d']*100,1)}% | 7 nap {round(sa['change_7d']*100,1)}%\n"
-                f"⭐ Pontszám: {score}/100"
+                f"⭐ Pontszam: {score}/100"
             )
 
         if not sell_alerts and not buy_alerts:
             print("Nincs alert ebben a ciklusban.")
 
-        print(f"Ciklus kész. Várok {CHECK_INTERVAL}mp-t...")
+        print(f"Ciklus kesz. Varok {CHECK_INTERVAL}mp-t...")
         await asyncio.sleep(CHECK_INTERVAL)
 
     except Exception as e:
@@ -414,11 +413,11 @@ while True:
         await asyncio.sleep(60)
 ```
 
-# —————————–
+# ———————––
 
 # BOT EVENTS
 
-# —————————–
+# ———————––
 
 @client.event
 async def on_ready():
