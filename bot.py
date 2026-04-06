@@ -72,7 +72,7 @@ client   = discord.Client(intents=discord.Intents.default())
 # -------------------------
 
 profit_log      = defaultdict(list)
-last_heartbeat  = 0
+last_heartbeat  = 0.0   # FIX: time.time() alapu, float
 buy_signals     = {}
 previous_prices = {}
 price_cache     = {}
@@ -103,7 +103,7 @@ def _fetch_price_sync(market_hash_name):
 
         if res.status_code == 429:
             print(f"RATE LIMIT: {market_hash_name}, varok 60mp-t...")
-            time.sleep(60)
+            time.sleep(60)  # executor threadben van, nem blokkol
             return None
         if res.status_code == 401:
             print("HIBAS API KULCS!")
@@ -112,7 +112,8 @@ def _fetch_price_sync(market_hash_name):
             print(f"HTTP HIBA {res.status_code}: {market_hash_name}")
             return None
 
-        listings = res.json().get("data", [])
+        data = res.json()
+        listings = data.get("data", [])
         if not listings:
             return None
 
@@ -124,6 +125,10 @@ def _fetch_price_sync(market_hash_name):
         return None
 
 def _fetch_price_history_sync(market_hash_name):
+    """
+    Megprobaljuk a price-history endpointot. Ha nem mukodik
+    (pl. free API kulcs), visszaterunk ures listaval.
+    """
     try:
         time.sleep(REQUEST_DELAY)
         url = f"{CSFLOAT_BASE}/market/price-history"
@@ -134,11 +139,17 @@ def _fetch_price_history_sync(market_hash_name):
             print(f"RATE LIMIT (history): {market_hash_name}, varok 60mp-t...")
             time.sleep(60)
             return []
+        if res.status_code == 403:
+            print(f"HOZZAFERES MEGTAGADVA (history) - lehet free API limit: {market_hash_name}")
+            return []
         if res.status_code != 200:
+            print(f"HISTORY HIBA {res.status_code}: {market_hash_name}")
             return []
 
         entries = res.json().get("data", [])
-        return [round(e["price"] / 100, 2) for e in entries if "price" in e]
+        prices = [round(e["price"] / 100, 2) for e in entries if "price" in e]
+        print(f"  history ok: {market_hash_name} -> {len(prices)} pont")
+        return prices
 
     except Exception as e:
         print(f"AR TORTENET HIBA ({market_hash_name}): {e}")
@@ -152,14 +163,14 @@ def analyze_trend(prices):
     if len(prices) < 3:
         return None
 
-    prices    = np.array(prices)
+    prices    = np.array(prices, dtype=float)
     current   = prices[-1]
-    change_1d = (current - prices[-2]) / prices[-2] if len(prices) >= 2 else 0
+    change_1d = (current - prices[-2]) / prices[-2] if len(prices) >= 2 else 0.0
     change_7d = (current - prices[-7]) / prices[-7] if len(prices) >= 7 else (current - prices[0]) / prices[0]
     short_avg = np.mean(prices[-3:])
     long_avg  = np.mean(prices[-min(14, len(prices)):])
-    momentum  = (short_avg - long_avg) / long_avg if long_avg > 0 else 0
-    slope     = np.polyfit(np.arange(len(prices)), prices, 1)[0]
+    momentum  = (short_avg - long_avg) / long_avg if long_avg > 0 else 0.0
+    slope     = float(np.polyfit(np.arange(len(prices)), prices, 1)[0])
     spike     = change_1d > 0.15 or momentum > 0.12
 
     return {
@@ -169,6 +180,24 @@ def analyze_trend(prices):
         "momentum":  momentum,
         "slope":     slope,
         "spike":     spike
+    }
+
+def analyze_from_single_price(current_price, name):
+    """
+    Ha nincs price history, csak az aktualis ar + cachelt elozobol
+    keszitunk minimalis trend adatot.
+    """
+    prev = previous_prices.get(name)
+    if prev is None or prev == 0:
+        return None
+    change = (current_price - prev) / prev
+    return {
+        "current":   current_price,
+        "change_1d": change,
+        "change_7d": change,
+        "momentum":  0.0,
+        "slope":     0.0,
+        "spike":     change > 0.15
     }
 
 def score_buy_opportunity(case_a, avg_skin_a):
@@ -208,6 +237,9 @@ async def get_price_change(name):
         previous_prices[name] = current
         return current, None
     prev   = previous_prices[name]
+    if prev == 0:
+        previous_prices[name] = current
+        return current, None
     change = (current - prev) / prev
     previous_prices[name] = current
     return current, change
@@ -217,20 +249,21 @@ async def get_price_change(name):
 # -------------------------
 
 def get_priority(score):
-    if score >= 75:   return "🔥 EROS VETEL"
-    elif score >= 50: return "⚡ KOZEPES VETEL"
-    else:             return "ℹ️ GYENGE VETEL"
+    if score >= 75:   return "EROS VETEL"
+    elif score >= 50: return "KOZEPES VETEL"
+    else:             return "GYENGE VETEL"
 
 def get_sell_priority(change):
-    if change >= 0.25:   return "🔥 AZONNALI ELADAS"
-    elif change >= 0.15: return "⚡ ERDEMES ELADNI"
-    else:                return "ℹ️ FIGYELJ RA"
+    if change >= 0.25:   return "AZONNALI ELADAS"
+    elif change >= 0.15: return "ERDEMES ELADNI"
+    else:                return "FIGYELJ RA"
 
 # -------------------------
 # PERFORMANCE TRACKING
 # -------------------------
 
 async def check_performance(channel, current_time):
+    to_delete = []
     for item in list(buy_signals.keys()):
         data          = buy_signals[item]
         elapsed       = current_time - data["timestamp"]
@@ -240,34 +273,39 @@ async def check_performance(channel, current_time):
             continue
 
         initial = data["initial_price"]
+        if initial == 0:
+            continue
         change  = (current_price - initial) / initial
-        emoji   = "📈" if change > 0 else "📉"
+        emoji   = "fel" if change > 0 else "le"
         sign    = "+" if change > 0 else ""
 
         if elapsed > 86400 and not data.get("reported_24h"):
             buy_signals[item]["reported_24h"] = True
             await channel.send(
-                f"📊 **24H VISSZAJELZES** {emoji}\n`{item}`\n"
-                f"Vetel: {round(initial,2)}EUR -> Most: {round(current_price,2)}EUR\n"
-                f"Eredmeny: {sign}{round(change*100,2)}%"
+                f"24H VISSZAJELZES {emoji}\n`{item}`\n"
+                f"Vetel: {round(initial, 2)} EUR -> Most: {round(current_price, 2)} EUR\n"
+                f"Eredmeny: {sign}{round(change * 100, 2)}%"
             )
-            del buy_signals[item]
+            to_delete.append(item)
 
         elif elapsed > 21600 and not data.get("reported_6h"):
             buy_signals[item]["reported_6h"] = True
             await channel.send(
-                f"📊 **6H VISSZAJELZES** {emoji}\n`{item}`\n"
-                f"Vetel: {round(initial,2)}EUR -> Most: {round(current_price,2)}EUR\n"
-                f"Valtozas: {sign}{round(change*100,2)}%"
+                f"6H VISSZAJELZES {emoji}\n`{item}`\n"
+                f"Vetel: {round(initial, 2)} EUR -> Most: {round(current_price, 2)} EUR\n"
+                f"Valtozas: {sign}{round(change * 100, 2)}%"
             )
 
         elif elapsed > 3600 and not data.get("reported_1h"):
             buy_signals[item]["reported_1h"] = True
             await channel.send(
-                f"📊 **1H VISSZAJELZES** {emoji}\n`{item}`\n"
-                f"Vetel: {round(initial,2)}EUR -> Most: {round(current_price,2)}EUR\n"
-                f"Valtozas: {sign}{round(change*100,2)}%"
+                f"1H VISSZAJELZES {emoji}\n`{item}`\n"
+                f"Vetel: {round(initial, 2)} EUR -> Most: {round(current_price, 2)} EUR\n"
+                f"Valtozas: {sign}{round(change * 100, 2)}%"
             )
+
+    for item in to_delete:
+        buy_signals.pop(item, None)
 
 # -------------------------
 # FO CIKLUS
@@ -279,19 +317,21 @@ async def main_loop():
     print("main_loop elindult!")
     channel = await client.fetch_channel(CHANNEL_ID)
     await channel.send(
-        "✅ **CS2 Trading Bot online!**\n"
-        "📡 CSFloat API kapcsolodva\n"
-        f"🔍 {len(ALL_CASES)} lada figyelese aktiv"
+        "CS2 Trading Bot online!\n"
+        "CSFloat API kapcsolodva\n"
+        f"{len(ALL_CASES)} lada figyelese aktiv"
     )
 
     while True:
         try:
-            current_time = asyncio.get_running_loop().time()
+            current_time = time.time()  # FIX: konzisztens time.time() hasznalat
             print("--- UJ CIKLUS ---")
 
+            # FIX: heartbeat helyesen mukodik most
             if current_time - last_heartbeat > 3600:
-                await channel.send("💓 Bot online es figyel!")
+                await channel.send("Bot online es figyel!")
                 last_heartbeat = current_time
+                print(f"Heartbeat kuldve. Kovetkezo 1 ora mulva.")
 
             await check_performance(channel, current_time)
 
@@ -299,25 +339,34 @@ async def main_loop():
             sell_alerts = []
 
             for case in ALL_CASES[:MAX_CASES]:
+                # Megprobaljuk a history-t, ha ures -> fallback sima arra
                 case_history  = await get_price_history(case)
                 case_analysis = analyze_trend(case_history)
 
                 if not case_analysis:
-                    print(f"Nincs eleg adat: {case}")
-                    continue
+                    # Fallback: csak az aktualis ar + valtozas
+                    case_price, case_live_change = await get_price_change(case)
+                    if case_price is None:
+                        print(f"Nincs adat: {case}")
+                        continue
+                    case_analysis = analyze_from_single_price(case_price, case)
+                    if not case_analysis:
+                        print(f"Nincs eleg adat meg (elso keres): {case}")
+                        continue
+                else:
+                    case_price = case_analysis["current"]
+                    _, case_live_change = await get_price_change(case)
 
-                case_price = case_analysis["current"]
                 print(
-                    f"Lada: {case} | {case_price}EUR | "
-                    f"1d: {round(case_analysis['change_1d']*100,1)}% | "
-                    f"7d: {round(case_analysis['change_7d']*100,1)}%"
+                    f"Lada: {case} | {case_price} EUR | "
+                    f"1d: {round(case_analysis['change_1d'] * 100, 1)}% | "
+                    f"7d: {round(case_analysis['change_7d'] * 100, 1)}%"
                 )
 
-                _, case_live_change = await get_price_change(case)
                 if case_live_change is not None and case_live_change >= SELL_THRESHOLD:
                     sell_alerts.append(
-                        f"{get_sell_priority(case_live_change)} **LADA SELL**\n`{case}`\n"
-                        f"Ar: {case_price}EUR | +{round(case_live_change*100,2)}%"
+                        f"{get_sell_priority(case_live_change)} LADA SELL\n`{case}`\n"
+                        f"Ar: {case_price} EUR | +{round(case_live_change * 100, 2)}%"
                     )
 
                 skins         = CASE_SKINS.get(case, [])
@@ -326,13 +375,26 @@ async def main_loop():
                 for skin in skins[:MAX_SKINS_PER_CASE]:
                     history  = await get_price_history(skin)
                     analysis = analyze_trend(history)
-                    if analysis:
+
+                    if not analysis:
+                        # Fallback sima arra
+                        skin_price, skin_live = await get_price_change(skin)
+                        if skin_price is not None:
+                            analysis = analyze_from_single_price(skin_price, skin)
+                            if analysis:
+                                skin_analyses.append((skin, analysis))
+                            if skin_live is not None and skin_live >= SELL_THRESHOLD:
+                                sell_alerts.append(
+                                    f"{get_sell_priority(skin_live)} SKIN SELL\n`{skin}`\n"
+                                    f"Ar: {skin_price} EUR | +{round(skin_live * 100, 2)}%"
+                                )
+                    else:
                         skin_analyses.append((skin, analysis))
                         _, skin_live = await get_price_change(skin)
                         if skin_live is not None and skin_live >= SELL_THRESHOLD:
                             sell_alerts.append(
-                                f"{get_sell_priority(skin_live)} **SKIN SELL**\n`{skin}`\n"
-                                f"Ar: {analysis['current']}EUR | +{round(skin_live*100,2)}%"
+                                f"{get_sell_priority(skin_live)} SKIN SELL\n`{skin}`\n"
+                                f"Ar: {analysis['current']} EUR | +{round(skin_live * 100, 2)}%"
                             )
 
                 if not skin_analyses:
@@ -365,10 +427,10 @@ async def main_loop():
             for score, case, price, ca, sa in buy_alerts:
                 await channel.send(
                     f"{get_priority(score)}\n`{case}`\n"
-                    f"💰 Ar: **{price}EUR**\n"
-                    f"📈 Lada: 1 nap +{round(ca['change_1d']*100,1)}% | 7 nap +{round(ca['change_7d']*100,1)}%\n"
-                    f"📉 Skinek: 1 nap {round(sa['change_1d']*100,1)}% | 7 nap {round(sa['change_7d']*100,1)}%\n"
-                    f"⭐ Pontszam: {score}/100"
+                    f"Ar: {price} EUR\n"
+                    f"Lada: 1 nap +{round(ca['change_1d'] * 100, 1)}% | 7 nap +{round(ca['change_7d'] * 100, 1)}%\n"
+                    f"Skinek: 1 nap {round(sa['change_1d'] * 100, 1)}% | 7 nap {round(sa['change_7d'] * 100, 1)}%\n"
+                    f"Pontszam: {score}/100"
                 )
 
             if not sell_alerts and not buy_alerts:
@@ -379,7 +441,10 @@ async def main_loop():
 
         except Exception as e:
             print(f"HIBA a ciklusban: {e}")
-            await channel.send(f"⚠️ Hiba: `{e}`")
+            try:
+                await channel.send(f"Hiba: `{e}`")
+            except Exception:
+                pass
             await asyncio.sleep(60)
 
 # -------------------------
