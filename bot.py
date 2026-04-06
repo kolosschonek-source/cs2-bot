@@ -322,9 +322,33 @@ async def main_loop():
         f"{len(ALL_CASES)} lada figyelese aktiv"
     )
 
+    # --- INDULASKORI AR ELLENORZES (csak egyszer) ---
+    await channel.send("Ladak aktualis arainak lekerdezese indul...")
+    ar_uzenet = ""
+    sikeres = 0
+    sikertelen = 0
+    for case in ALL_CASES:
+        price = await get_price(case)
+        if price is not None:
+            ar_uzenet += f"{case}: {price} EUR\n"
+            sikeres += 1
+        else:
+            ar_uzenet += f"{case}: nem elerheto\n"
+            sikertelen += 1
+        if len(ar_uzenet) > 1700:
+            await channel.send(ar_uzenet)
+            ar_uzenet = ""
+    if ar_uzenet:
+        await channel.send(ar_uzenet)
+    await channel.send(
+        f"Ar lekerdezes kesz: {sikeres} sikeres, {sikertelen} sikertelen\n"
+        f"Ha sok a 'nem elerheto', az API kulcs lehet a problema."
+    )
+    # -------------------------------------------------
+
     while True:
         try:
-            current_time = time.time()  # FIX: konzisztens time.time() hasznalat
+            current_time = time.time()
             print("--- UJ CIKLUS ---")
 
             # FIX: heartbeat helyesen mukodik most
