@@ -358,7 +358,7 @@ async def main_loop():
                         continue
 
                     # Csak ha a skin ara is emelkedett (barmennyit)
-                    if skin_change >= 0:
+                    if skin_change <= 0:
                         continue
 
                     label = get_signal_label(skin_change)
