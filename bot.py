@@ -45,45 +45,63 @@ def load_cases():
 CASE_SKINS = load_cases()
 ALL_CASES  = list(CASE_SKINS.keys())
 
+# Skin -> lada mapping (gyors kereseshez)
+SKIN_TO_CASE = {}
+for case_name, skins in CASE_SKINS.items():
+    for skin in skins:
+        SKIN_TO_CASE[skin] = case_name
+
 # -------------------------
 # CONFIG
 # -------------------------
 
-TOKEN           = os.getenv("DISCORD_TOKEN")
-CSFLOAT_API_KEY = os.getenv("CSFLOAT_API_KEY")
-CHANNEL_ID      = 1487500804532207699
+TOKEN      = os.getenv("DISCORD_TOKEN")
+CHANNEL_ID = 1487500804532207699
 
-CHECK_INTERVAL        = 600   # 10 perc
-STEAM_REQUEST_DELAY   = 3.0   # Steam rate limit miatt
-CSFLOAT_REQUEST_DELAY = 1.5
-CACHE_TTL             = 300   # 5 perc
+CHECK_INTERVAL      = 600   # 10 perc
+STEAM_REQUEST_DELAY = 3.0   # Steam rate limit miatt
+CACHE_TTL           = 300   # 5 perc cache
 
-CASE_RISE_THRESHOLD = 0.06
-SKIN_FOLLOW_MAX     = 0.04
-SELL_THRESHOLD      = 0.001
+# Lada emelkedes kuszob amitol elkezdjuk nezni a skineket
+CASE_RISE_THRESHOLD = 0.08  # 8%
 
-MAX_CASES          = 15
-MAX_SKINS_PER_CASE = 8
+# Vetel ertek hatarok (skin emelkedes alapjan)
+SIGNAL_STRONG  = 0.05   # 5%+ emelkedes  -> "JO VETEL LEHET"
+SIGNAL_MEDIUM  = 0.02   # 2-5% emelkedes -> "ERDEMES MEGFONTOLNI"
+SIGNAL_WEAK    = 0.005  # 0.5-2% emelked -> "FIGYELD"
 
-STEAM_APP_ID    = 730
-STEAM_CURRENCY  = 3   # EUR
+# 8 napos kovetes ideje masodpercben
+TRACKING_DAYS    = 8
+TRACKING_SECONDS = TRACKING_DAYS * 86400
 
-executor     = ThreadPoolExecutor(max_workers=2)
-client       = discord.Client(intents=discord.Intents.default())
+STEAM_APP_ID   = 730
+STEAM_CURRENCY = 3   # EUR
+
+executor = ThreadPoolExecutor(max_workers=2)
+
+# Discord slash command-okhoz
+intents = discord.Intents.default()
+intents.message_content = True
+client  = discord.Client(intents=intents)
+tree    = discord.app_commands.CommandTree(client)
 
 # -------------------------
 # TRACKING
 # -------------------------
 
 last_heartbeat  = 0.0
-buy_signals     = {}
-previous_prices = {}
-price_cache     = {}
-cache_ts        = {}
-loop_started    = False
+previous_prices = {}   # arak az elozo korbol (lada es skin egyutt)
+price_cache     = {}   # cache
+cache_ts        = {}   # cache timestamp
+
+# Manualis skin kovetes (slash command-bol)
+# { "skin_neve": { "start_price": float, "start_time": float, "channel_id": int } }
+manual_tracking = {}
+
+loop_started = False
 
 # -------------------------
-# STEAM MARKET API (ladakhoz - ingyenes, nem kell API kulcs)
+# STEAM MARKET API
 # -------------------------
 
 STEAM_BASE = "https://steamcommunity.com/market/priceoverview/"
@@ -102,7 +120,7 @@ def _fetch_steam_price_sync(market_hash_name):
         res = requests.get(STEAM_BASE, params=params, headers=headers, timeout=15)
 
         if res.status_code == 429:
-            print(f"STEAM RATE LIMIT: {market_hash_name}, varok 60mp-t...")
+            print(f"STEAM RATE LIMIT: {market_hash_name}")
             time.sleep(60)
             return None
         if res.status_code != 200:
@@ -117,7 +135,6 @@ def _fetch_steam_price_sync(market_hash_name):
         if not lowest:
             return None
 
-        # Ar kinyerese a stringbol (pl. "1,23 EUR" vagy "1.23EUR")
         cleaned = ""
         for ch in lowest.replace(",", "."):
             if ch.isdigit() or ch == ".":
@@ -134,185 +151,139 @@ def _fetch_steam_price_sync(market_hash_name):
         return None
 
 # -------------------------
-# CSFLOAT API (skinekhez)
+# CACHE + ASYNC WRAPPER
 # -------------------------
 
-CSFLOAT_BASE = "https://csfloat.com/api/v1"
-
-def _csfloat_headers():
-    return {"Authorization": CSFLOAT_API_KEY, "Content-Type": "application/json"}
-
-def _fetch_csfloat_price_sync(market_hash_name):
-    try:
-        time.sleep(CSFLOAT_REQUEST_DELAY)
-        url = f"{CSFLOAT_BASE}/listings"
-        params = {
-            "market_hash_name": market_hash_name,
-            "sort_by": "price",
-            "order": "asc",
-            "limit": 5,
-            "category": 0
-        }
-        res = requests.get(url, headers=_csfloat_headers(), params=params, timeout=15)
-
-        if res.status_code == 429:
-            time.sleep(60)
-            return None
-        if res.status_code == 401:
-            print("HIBAS CSFLOAT API KULCS!")
-            return None
-        if res.status_code != 200:
-            return None
-
-        listings = res.json().get("data", [])
-        if not listings:
-            return None
-
-        price_cents = listings[0].get("price")
-        return round(price_cents / 100, 2) if price_cents else None
-
-    except Exception as e:
-        print(f"CSFLOAT HIBA ({market_hash_name}): {e}")
-        return None
-
-# -------------------------
-# CACHE + ASYNC WRAPPEREK
-# -------------------------
-
-async def get_case_price(name):
-    """Lada arat Steam Market-rol kerunk."""
+async def get_price(name):
     now = time.time()
-    cache_key = f"case_{name}"
-    if cache_key in price_cache and (now - cache_ts.get(cache_key, 0)) < CACHE_TTL:
-        return price_cache[cache_key]
+    if name in price_cache and (now - cache_ts.get(name, 0)) < CACHE_TTL:
+        return price_cache[name]
     loop  = asyncio.get_running_loop()
     price = await loop.run_in_executor(executor, _fetch_steam_price_sync, name)
     if price is not None:
-        price_cache[cache_key] = price
-        cache_ts[cache_key]    = now
+        price_cache[name] = price
+        cache_ts[name]    = now
     return price
 
-async def get_skin_price(name):
-    """Skin arat CSFloat-rol kerunk, ha nem megy akkor Steam fallback."""
-    now = time.time()
-    cache_key = f"skin_{name}"
-    if cache_key in price_cache and (now - cache_ts.get(cache_key, 0)) < CACHE_TTL:
-        return price_cache[cache_key]
-    loop  = asyncio.get_running_loop()
-    price = await loop.run_in_executor(executor, _fetch_csfloat_price_sync, name)
-    if price is None:
-        price = await loop.run_in_executor(executor, _fetch_steam_price_sync, name)
-    if price is not None:
-        price_cache[cache_key] = price
-        cache_ts[cache_key]    = now
-    return price
-
-async def get_price_change(name, is_case=False):
-    current = await get_case_price(name) if is_case else await get_skin_price(name)
+async def get_price_change(name):
+    """Visszaadja az aktualis arat es a valtozast az elozo korhoz kepest."""
+    current = await get_price(name)
     if current is None:
         return None, None
-    key = f"{'case' if is_case else 'skin'}_{name}"
-    if key not in previous_prices:
-        previous_prices[key] = current
+    if name not in previous_prices:
+        previous_prices[name] = current
         return current, None
-    prev = previous_prices[key]
+    prev = previous_prices[name]
     if prev == 0:
-        previous_prices[key] = current
+        previous_prices[name] = current
         return current, None
     change = (current - prev) / prev
-    previous_prices[key] = current
+    previous_prices[name] = current
     return current, change
 
 # -------------------------
-# TECHNIKAI ELEMZES
+# VETEL JELLEMES
 # -------------------------
 
-def analyze_from_single_price(current_price, name, is_case=False):
-    key = f"{'case' if is_case else 'skin'}_{name}"
-    prev = previous_prices.get(key)
-    if prev is None or prev == 0:
-        return None
-    change = (current_price - prev) / prev
-    return {
-        "current":   current_price,
-        "change_1d": change,
-        "change_7d": change,
-        "momentum":  0.0,
-        "slope":     0.0,
-        "spike":     change > 0.15
+def get_signal_label(change):
+    if change >= SIGNAL_STRONG:
+        return "VEDD MEG"
+    elif change >= SIGNAL_MEDIUM:
+        return "JO VETEL LEHET"
+    else:
+        return "FIGYELD"
+
+# -------------------------
+# SLASH COMMAND: /skin
+# -------------------------
+
+@tree.command(name="skin", description="8 napig koveti a megadott skin arat es jelzi a valtozast")
+@discord.app_commands.describe(nev="A skin neve pontosan, pl: AK-47 | Inheritance")
+async def skin_command(interaction: discord.Interaction, nev: str):
+    # Ellenorizzuk hogy letezik-e a skin a cases.json-ban
+    found = nev in SKIN_TO_CASE
+    if not found:
+        # Kis- nagybetus elteres kiszurese
+        for s in SKIN_TO_CASE.keys():
+            if s.lower() == nev.lower():
+                nev   = s
+                found = True
+                break
+
+    if not found:
+        await interaction.response.send_message(
+            f"Nem talaltam ezt a skint a cases.json-ban: `{nev}`\n"
+            f"Ellenorizd a nevet! (pl: `AK-47 | Inheritance`)",
+            ephemeral=True
+        )
+        return
+
+    # Aktualis ar lekeres
+    price = await get_price(nev)
+    if price is None:
+        await interaction.response.send_message(
+            f"Nem sikerult az arat lekerni: `{nev}`\nProbald kesobb!",
+            ephemeral=True
+        )
+        return
+
+    # Kovetes inditasa
+    manual_tracking[nev] = {
+        "start_price":  price,
+        "start_time":   time.time(),
+        "channel_id":   interaction.channel_id,
+        "reported_8d":  False
     }
 
-def score_buy_opportunity(case_a, avg_skin_a):
-    score = 0
-    if case_a["change_1d"] > 0.05:     score += 20
-    if case_a["change_7d"] > 0.08:     score += 20
-    if case_a["momentum"]  > 0.05:     score += 15
-    if case_a["slope"]     > 0:        score += 10
-    if avg_skin_a["change_1d"] < 0.02: score += 20
-    if avg_skin_a["change_7d"] < 0.03: score += 15
-    return score
+    await interaction.response.send_message(
+        f"Kovetes elindult!\n"
+        f"Skin: `{nev}`\n"
+        f"Jelenlegi ar: {price} EUR\n"
+        f"8 nap mulva kuldok visszajelzest a valtozasrol."
+    )
 
 # -------------------------
-# PRIORITAS
+# MANUALIS KOVETES ELLENORZESE
 # -------------------------
 
-def get_priority(score):
-    if score >= 75:   return "EROS VETEL"
-    elif score >= 50: return "KOZEPES VETEL"
-    else:             return "GYENGE VETEL"
-
-def get_sell_priority(change):
-    if change >= 0.25:   return "AZONNALI ELADAS"
-    elif change >= 0.15: return "ERDEMES ELADNI"
-    else:                return "FIGYELJ RA"
-
-# -------------------------
-# PERFORMANCE TRACKING
-# -------------------------
-
-async def check_performance(channel, current_time):
+async def check_manual_tracking(channel):
+    now = time.time()
     to_delete = []
-    for item, data in list(buy_signals.items()):
-        elapsed       = current_time - data["timestamp"]
-        is_case       = data.get("is_case", False)
-        current_price = await get_case_price(item) if is_case else await get_skin_price(item)
 
-        if current_price is None:
-            continue
+    for skin, data in list(manual_tracking.items()):
+        elapsed = now - data["start_time"]
 
-        initial = data["initial_price"]
-        if initial == 0:
-            continue
+        if elapsed >= TRACKING_SECONDS and not data.get("reported_8d"):
+            current_price = await get_price(skin)
+            if current_price is None:
+                continue
 
-        change = (current_price - initial) / initial
-        irany  = "fel" if change > 0 else "le"
-        sign   = "+" if change > 0 else ""
+            initial = data["start_price"]
+            if initial == 0:
+                continue
 
-        if elapsed > 86400 and not data.get("reported_24h"):
-            buy_signals[item]["reported_24h"] = True
-            await channel.send(
-                f"24H VISSZAJELZES ({irany})\n`{item}`\n"
-                f"Vetel: {round(initial, 2)} EUR -> Most: {round(current_price, 2)} EUR\n"
-                f"Eredmeny: {sign}{round(change * 100, 2)}%"
+            change = (current_price - initial) / initial
+            sign   = "+" if change >= 0 else ""
+            irany  = "emelkedett" if change >= 0 else "csokkent"
+
+            # Uzenet kuldese arra a csatornara ahol a commandot hasznaltak
+            try:
+                target_channel = await client.fetch_channel(data["channel_id"])
+            except Exception:
+                target_channel = channel
+
+            await target_channel.send(
+                f"8 NAPOS VISSZAJELZES\n"
+                f"Skin: `{skin}`\n"
+                f"Indulasi ar: {round(initial, 2)} EUR\n"
+                f"Jelenlegi ar: {round(current_price, 2)} EUR\n"
+                f"Az ar {sign}{round(change * 100, 2)}% {irany} a kovetesi idoszak alatt."
             )
-            to_delete.append(item)
-        elif elapsed > 21600 and not data.get("reported_6h"):
-            buy_signals[item]["reported_6h"] = True
-            await channel.send(
-                f"6H VISSZAJELZES ({irany})\n`{item}`\n"
-                f"Vetel: {round(initial, 2)} EUR -> Most: {round(current_price, 2)} EUR\n"
-                f"Valtozas: {sign}{round(change * 100, 2)}%"
-            )
-        elif elapsed > 3600 and not data.get("reported_1h"):
-            buy_signals[item]["reported_1h"] = True
-            await channel.send(
-                f"1H VISSZAJELZES ({irany})\n`{item}`\n"
-                f"Vetel: {round(initial, 2)} EUR -> Most: {round(current_price, 2)} EUR\n"
-                f"Valtozas: {sign}{round(change * 100, 2)}%"
-            )
+            manual_tracking[skin]["reported_8d"] = True
+            to_delete.append(skin)
 
-    for item in to_delete:
-        buy_signals.pop(item, None)
+    for skin in to_delete:
+        manual_tracking.pop(skin, None)
 
 # -------------------------
 # FO CIKLUS
@@ -324,18 +295,18 @@ async def main_loop():
     channel = await client.fetch_channel(CHANNEL_ID)
     await channel.send(
         "CS2 Trading Bot online!\n"
-        "Ladak: Steam Market API\n"
-        "Skinek: CSFloat API + Steam fallback\n"
-        f"{len(ALL_CASES)} lada figyelese aktiv"
+        "Ladak es skinek: Steam Market API\n"
+        f"{len(ALL_CASES)} lada figyelese aktiv\n"
+        "Slash command: /skin [nev] - 8 napos kovetes"
     )
 
-    # --- INDULASKORI AR ELLENORZES (csak egyszer) ---
-    await channel.send("Ladak aktualis arainak lekerdezese indul (Steam Market)...")
+    # --- INDULASKORI AR ELLENORZES ---
+    await channel.send("Ladak aktualis arainak lekerdezese indul...")
     ar_uzenet = ""
-    sikeres = 0
+    sikeres   = 0
     sikertelen = 0
     for case in ALL_CASES:
-        price = await get_case_price(case)
+        price = await get_price(case)
         if price is not None:
             ar_uzenet += f"{case}: {price} EUR\n"
             sikeres += 1
@@ -356,86 +327,47 @@ async def main_loop():
         try:
             current_time = time.time()
 
+            # Heartbeat
             if current_time - last_heartbeat > 3600:
                 await channel.send("Bot online es figyel!")
                 last_heartbeat = current_time
 
-            await check_performance(channel, current_time)
+            # Manualis kovetes ellenorzese
+            await check_manual_tracking(channel)
 
-            buy_alerts  = []
-            sell_alerts = []
+            # ----------------------------------
+            # FO LOGIKA: Lada + Skin figyelese
+            # ----------------------------------
+            for case in ALL_CASES:
+                case_price, case_change = await get_price_change(case)
 
-            for case in ALL_CASES[:MAX_CASES]:
-                case_price, case_live_change = await get_price_change(case, is_case=True)
-
-                if case_price is None:
+                if case_price is None or case_change is None:
+                    # Elso kor, meg nincs mihez hasonlitani
                     continue
 
-                case_analysis = analyze_from_single_price(case_price, case, is_case=True)
-                if not case_analysis:
+                # Ha a lada ara NEM emelkedett 8%-ot, kihagyjuk
+                if case_change < CASE_RISE_THRESHOLD:
                     continue
 
-                if case_live_change is not None and case_live_change >= SELL_THRESHOLD:
-                    sell_alerts.append(
-                        f"{get_sell_priority(case_live_change)} LADA SELL\n`{case}`\n"
-                        f"Ar: {case_price} EUR | +{round(case_live_change * 100, 2)}%"
+                # Lada 8%+ emelkedett -> megnezzuk a skineket
+                skins = CASE_SKINS.get(case, [])
+                for skin in skins:
+                    skin_price, skin_change = await get_price_change(skin)
+
+                    if skin_price is None or skin_change is None:
+                        continue
+
+                    # Csak ha a skin ara is emelkedett (barmennyit)
+                    if skin_change <= 0:
+                        continue
+
+                    label = get_signal_label(skin_change)
+                    await channel.send(
+                        f"A \"{case}\"-ban a \"{skin}\" - {label}\n"
+                        f"Lada emelkedes: +{round(case_change * 100, 2)}%\n"
+                        f"Skin jelenlegi ar: {skin_price} EUR "
+                        f"(+{round(skin_change * 100, 2)}%)"
                     )
-
-                skins         = CASE_SKINS.get(case, [])
-                skin_analyses = []
-
-                for skin in skins[:MAX_SKINS_PER_CASE]:
-                    skin_price, skin_live = await get_price_change(skin, is_case=False)
-
-                    if skin_price is not None:
-                        analysis = analyze_from_single_price(skin_price, skin, is_case=False)
-                        if analysis:
-                            skin_analyses.append((skin, analysis))
-                        if skin_live is not None and skin_live >= SELL_THRESHOLD:
-                            sell_alerts.append(
-                                f"{get_sell_priority(skin_live)} SKIN SELL\n`{skin}`\n"
-                                f"Ar: {skin_price} EUR | +{round(skin_live * 100, 2)}%"
-                            )
-
-                if not skin_analyses:
-                    continue
-
-                avg_skin = {
-                    "change_1d": np.mean([a["change_1d"] for _, a in skin_analyses]),
-                    "change_7d": np.mean([a["change_7d"] for _, a in skin_analyses]),
-                }
-
-                score = score_buy_opportunity(case_analysis, avg_skin)
-
-                if (
-                    (case_analysis["change_1d"] >= CASE_RISE_THRESHOLD or
-                     case_analysis["change_7d"] >= CASE_RISE_THRESHOLD) and
-                    avg_skin["change_1d"] < SKIN_FOLLOW_MAX and
-                    score >= 40
-                ):
-                    if case not in buy_signals:
-                        buy_signals[case] = {
-                            "timestamp":     current_time,
-                            "initial_price": case_price,
-                            "is_case":       True,
-                        }
-                    buy_alerts.append((score, case, case_price, case_analysis, avg_skin))
-
-            for alert in sell_alerts:
-                await channel.send(alert)
-
-            buy_alerts.sort(key=lambda x: x[0], reverse=True)
-            for score, case, price, ca, sa in buy_alerts:
-                await channel.send(
-                    f"{get_priority(score)}\n`{case}`\n"
-                    f"Ar: {price} EUR\n"
-                    f"Lada: 1 nap +{round(ca['change_1d'] * 100, 1)}%\n"
-                    f"Skinek: 1 nap {round(sa['change_1d'] * 100, 1)}%\n"
-                    f"Pontszam: {score}/100"
-                )
-
-            if not sell_alerts and not buy_alerts:
-                print("Nincs alert ebben a ciklusban.")
 
             await asyncio.sleep(CHECK_INTERVAL)
 
@@ -455,6 +387,12 @@ async def main_loop():
 async def on_ready():
     global loop_started
     print(f"Bot bejelentkezve: {client.user}")
+    # Slash commandok szinkronizalasa
+    try:
+        synced = await tree.sync()
+        print(f"Slash commandok szinkronizalva: {len(synced)} db")
+    except Exception as e:
+        print(f"Slash command sync hiba: {e}")
     if not loop_started:
         loop_started = True
         asyncio.ensure_future(main_loop())
