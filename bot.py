@@ -65,10 +65,13 @@ CACHE_TTL           = 300   # 5 perc cache
 # Lada emelkedes kuszob amitol elkezdjuk nezni a skineket
 CASE_RISE_THRESHOLD = 0.08  # 8%
 
-# Vetel ertek hatarok (skin emelkedes alapjan)
-SIGNAL_STRONG  = 0.05   # 5%+ emelkedes  -> "JO VETEL LEHET"
-SIGNAL_MEDIUM  = 0.02   # 2-5% emelkedes -> "ERDEMES MEGFONTOLNI"
-SIGNAL_WEAK    = 0.005  # 0.5-2% emelked -> "FIGYELD"
+# Vetel jel hatarok - RES logika:
+# Ha a lada emelkedik de a skin meg NEM kovette -> venni kell a skint
+# Minel KEVESEBBET emelkedett a skin, annal jobb a vetel
+SIGNAL_STRONG_MAX = 0.01   # -inf% - +1%  -> "VEDD MEG"
+SIGNAL_MEDIUM_MAX = 0.03   # 1% - 3%      -> "JO VETEL LEHET"
+SIGNAL_WEAK_MAX   = 0.05   # 3% - 5%      -> "FIGYELD"
+# 5% felett mar nem jelzunk, a skin mar kovette a ladat
 
 # 8 napos kovetes ideje masodpercben
 TRACKING_DAYS    = 8
@@ -185,13 +188,20 @@ async def get_price_change(name):
 # VETEL JELLEMES
 # -------------------------
 
-def get_signal_label(change):
-    if change >= SIGNAL_STRONG:
+def get_signal_label(skin_change):
+    """
+    A skin valtozas alapjan donti el a vetel erosseget.
+    Minel kisebb (vagy negativabb) a skin valtozas, annal jobb a vetel,
+    mert a lada mar emelkedett de a skin meg nem kovette -> nagy a res.
+    """
+    if skin_change <= SIGNAL_STRONG_MAX:
         return "VEDD MEG"
-    elif change >= SIGNAL_MEDIUM:
+    elif skin_change <= SIGNAL_MEDIUM_MAX:
         return "JO VETEL LEHET"
-    else:
+    elif skin_change <= SIGNAL_WEAK_MAX:
         return "FIGYELD"
+    else:
+        return None   # 5%+ felett mar nem jelzunk
 
 # -------------------------
 # SLASH COMMAND: /skin
@@ -357,16 +367,18 @@ async def main_loop():
                     if skin_price is None or skin_change is None:
                         continue
 
-                    # Csak ha a skin ara is emelkedett (barmennyit)
-                    if skin_change <= 0:
+                    # Jel meghatarozasa a skin valtozasa alapjan
+                    # Ha a skin mar 5%+ emelkedett, nem jelzunk (elkesett)
+                    label = get_signal_label(skin_change)
+                    if label is None:
                         continue
 
-                    label = get_signal_label(skin_change)
+                    sign = "+" if skin_change >= 0 else ""
                     await channel.send(
                         f"A \"{case}\"-ban a \"{skin}\" - {label}\n"
                         f"Lada emelkedes: +{round(case_change * 100, 2)}%\n"
                         f"Skin jelenlegi ar: {skin_price} EUR "
-                        f"(+{round(skin_change * 100, 2)}%)"
+                        f"({sign}{round(skin_change * 100, 2)}%)"
                     )
 
             await asyncio.sleep(CHECK_INTERVAL)
