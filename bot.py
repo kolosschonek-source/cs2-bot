@@ -208,8 +208,11 @@ def get_signal_label(skin_change):
 # -------------------------
 
 @tree.command(name="skin", description="8 napig koveti a megadott skin arat es jelzi a valtozast")
-@discord.app_commands.describe(nev="A skin neve pontosan, pl: AK-47 | Inheritance")
+@discord.app_commands.describe(nev="A skin neve pontosan, pl: AK-47 | Inheritance (Field-Tested)")
 async def skin_command(interaction: discord.Interaction, nev: str):
+    # KRITIKUS: azonnal defer, kulonben Discord timeout (3mp limit)
+    await interaction.response.defer()
+
     # Ellenorizzuk hogy letezik-e a skin a cases.json-ban
     found = nev in SKIN_TO_CASE
     if not found:
@@ -221,19 +224,44 @@ async def skin_command(interaction: discord.Interaction, nev: str):
                 break
 
     if not found:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"Nem talaltam ezt a skint a cases.json-ban: `{nev}`\n"
             f"Ellenorizd a nevet! (pl: `AK-47 | Inheritance`)",
-            ephemeral=True
         )
         return
 
-    # Aktualis ar lekeres
-    price = await get_price(nev)
+    # Ha a felhasznalo nem adott meg kondiciót, megprobaljuk sorban
+    CONDITIONS = [
+        "",  # Eloszor probaljuk condition nelkul
+        " (Factory New)",
+        " (Minimal Wear)",
+        " (Field-Tested)",
+        " (Well-Worn)",
+        " (Battle-Scarred)",
+    ]
+
+    price = None
+    used_name = nev
+
+    if any(cond.strip() in nev for cond in CONDITIONS[1:]):
+        # A felhasznalo mar megadta a kondiciót
+        price = await get_price(nev)
+        used_name = nev
+    else:
+        # Vegigprobaljuk a kondiciokat
+        for cond in CONDITIONS:
+            test_name = nev + cond
+            p = await get_price(test_name)
+            if p is not None:
+                price = p
+                used_name = test_name
+                break
+
     if price is None:
-        await interaction.response.send_message(
-            f"Nem sikerult az arat lekerni: `{nev}`\nProbald kesobb!",
-            ephemeral=True
+        await interaction.followup.send(
+            f"Nem sikerult az arat lekerni: `{nev}`\n"
+            f"Probald meg a pontos Steam nevet kondicioval, pl:\n"
+            f"`AK-47 | Inheritance (Field-Tested)`"
         )
         return
 
@@ -242,12 +270,13 @@ async def skin_command(interaction: discord.Interaction, nev: str):
         "start_price":  price,
         "start_time":   time.time(),
         "channel_id":   interaction.channel_id,
-        "reported_8d":  False
+        "reported_8d":  False,
+        "used_name":    used_name  # ezt kell majd lekerdezni 8 nap mulva
     }
 
-    await interaction.response.send_message(
+    await interaction.followup.send(
         f"Kovetes elindult!\n"
-        f"Skin: `{nev}`\n"
+        f"Skin: `{used_name}`\n"
         f"Jelenlegi ar: {price} EUR\n"
         f"8 nap mulva kuldok visszajelzest a valtozasrol."
     )
@@ -264,7 +293,9 @@ async def check_manual_tracking(channel):
         elapsed = now - data["start_time"]
 
         if elapsed >= TRACKING_SECONDS and not data.get("reported_8d"):
-            current_price = await get_price(skin)
+            # used_name-et hasznaljuk ha van, kulonben a skin kulcsot
+            query_name = data.get("used_name", skin)
+            current_price = await get_price(query_name)
             if current_price is None:
                 continue
 
@@ -284,7 +315,7 @@ async def check_manual_tracking(channel):
 
             await target_channel.send(
                 f"8 NAPOS VISSZAJELZES\n"
-                f"Skin: `{skin}`\n"
+                f"Skin: `{query_name}`\n"
                 f"Indulasi ar: {round(initial, 2)} EUR\n"
                 f"Jelenlegi ar: {round(current_price, 2)} EUR\n"
                 f"Az ar {sign}{round(change * 100, 2)}% {irany} a kovetesi idoszak alatt."
