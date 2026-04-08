@@ -690,38 +690,37 @@ async def main_loop():
     channel = await client.fetch_channel(CHANNEL_ID)
     await channel.send("Online! Elemzem a ládákat...")
 
-    # Ládák árai
-    case_lines = []
+    # Ládák árai - darabolva ha kell
+    msg = "**Ládák aktuális árai:**\n"
     for case in ALL_CASES:
         price = await get_price(case)
-        if price is not None:
-            case_lines.append(f"{case}: {price:.2f} EUR")
-        else:
-            case_lines.append(f"{case}: nem elérhető")
-
-    # Üzenetek darabolása (2000 karakter limit)
-    msg = "**Ládák aktuális árai:**\n"
-    for line in case_lines:
-        if len(msg) + len(line) + 1 > 1900:
+        line  = f"{case}: {price:.2f} EUR\n" if price else f"{case}: nem elérhető\n"
+        if len(msg) + len(line) > 1900:
             await channel.send(msg)
             msg = ""
-        msg += line + "\n"
+        msg += line
     if msg:
         await channel.send(msg)
 
-    # Random 5 skin és ára
+    # Random 5 skin - kondícióval keres
     import random
+    CONDS     = [" (Factory New)", " (Minimal Wear)", " (Field-Tested)", " (Well-Worn)", " (Battle-Scarred)"]
     all_skins = list(SKIN_TO_CASE.keys())
-    random_skins = random.sample(all_skins, min(5, len(all_skins)))
+    jeloltek  = random.sample(all_skins, min(20, len(all_skins)))
     skin_lines = []
-    for skin in random_skins:
-        price = await get_price(skin)
-        if price is not None:
-            skin_lines.append(f"{skin}: {price:.2f} EUR")
-        else:
-            skin_lines.append(f"{skin}: nem elérhető")
+    for skin in jeloltek:
+        if len(skin_lines) >= 5:
+            break
+        for cond in CONDS:
+            p = await get_price(skin + cond)
+            if p is not None:
+                skin_lines.append(f"{skin}{cond}: {p:.2f} EUR")
+                break
+    if skin_lines:
+        await channel.send("**5 random skin ára:**\n" + "\n".join(skin_lines))
 
-    await channel.send("**5 random skin ára:**\n" + "\n".join(skin_lines))
+    # Heartbeat beállítása hogy ne szóljon azonnal
+    last_heartbeat = time.time()
 
     while True:
         try:
