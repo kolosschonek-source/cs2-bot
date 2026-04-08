@@ -688,33 +688,40 @@ async def main_loop():
     global last_heartbeat
 
     channel = await client.fetch_channel(CHANNEL_ID)
-    await channel.send(
-        "CS2 Trading Bot online!\n"
-        "Steam Market API | AI: Google Gemini (ingyenes)\n"
-        f"{len(ALL_CASES)} láda figyelése aktív\n"
-        "Commandok: /skin [nev] | /tip [nev] | /tip general"
-    )
+    await channel.send("Online! Elemzem a ládákat...")
 
-    await channel.send("Ladak aktualis arainak lekerdezese indul...")
-    ar_uzenet  = ""
-    sikeres    = 0
-    sikertelen = 0
+    # Ládák árai
+    case_lines = []
     for case in ALL_CASES:
         price = await get_price(case)
         if price is not None:
-            ar_uzenet += f"{case}: {price} EUR\n"
-            sikeres += 1
+            case_lines.append(f"{case}: {price:.2f} EUR")
         else:
-            ar_uzenet += f"{case}: nem elerheto\n"
-            sikertelen += 1
-        if len(ar_uzenet) > 1700:
-            await channel.send(ar_uzenet)
-            ar_uzenet = ""
-    if ar_uzenet:
-        await channel.send(ar_uzenet)
-    await channel.send(
-        f"Ar lekerdezes kesz: {sikeres} sikeres, {sikertelen} sikertelen"
-    )
+            case_lines.append(f"{case}: nem elérhető")
+
+    # Üzenetek darabolása (2000 karakter limit)
+    msg = "**Ládák aktuális árai:**\n"
+    for line in case_lines:
+        if len(msg) + len(line) + 1 > 1900:
+            await channel.send(msg)
+            msg = ""
+        msg += line + "\n"
+    if msg:
+        await channel.send(msg)
+
+    # Random 5 skin és ára
+    import random
+    all_skins = list(SKIN_TO_CASE.keys())
+    random_skins = random.sample(all_skins, min(5, len(all_skins)))
+    skin_lines = []
+    for skin in random_skins:
+        price = await get_price(skin)
+        if price is not None:
+            skin_lines.append(f"{skin}: {price:.2f} EUR")
+        else:
+            skin_lines.append(f"{skin}: nem elérhető")
+
+    await channel.send("**5 random skin ára:**\n" + "\n".join(skin_lines))
 
     while True:
         try:
