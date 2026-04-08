@@ -5,7 +5,6 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import requests
 import discord
 import asyncio
-import numpy as np
 import json
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -45,7 +44,6 @@ def load_cases():
 CASE_SKINS = load_cases()
 ALL_CASES  = list(CASE_SKINS.keys())
 
-# Skin -> lada mapping (gyors kereseshez)
 SKIN_TO_CASE = {}
 for case_name, skins in CASE_SKINS.items():
     for skin in skins:
@@ -55,34 +53,31 @@ for case_name, skins in CASE_SKINS.items():
 # CONFIG
 # -------------------------
 
-TOKEN      = os.getenv("DISCORD_TOKEN")
-CHANNEL_ID = 1487500804532207699
+TOKEN        = os.getenv("DISCORD_TOKEN")
+GEMINI_KEY   = os.getenv("GEMINI_API_KEY")   # <-- Render env vars-ban kell beállítani!
+CHANNEL_ID   = 1487500804532207699
 
-CHECK_INTERVAL      = 600   # 10 perc
-STEAM_REQUEST_DELAY = 3.0   # Steam rate limit miatt
-CACHE_TTL           = 300   # 5 perc cache
+CHECK_INTERVAL      = 600
+STEAM_REQUEST_DELAY = 3.0
+CACHE_TTL           = 300
 
-# Lada emelkedes kuszob amitol elkezdjuk nezni a skineket
-CASE_RISE_THRESHOLD = 0.08  # 8%
+CASE_RISE_THRESHOLD = 0.08
 
-# Vetel jel hatarok - RES logika:
-# Ha a lada emelkedik de a skin meg NEM kovette -> venni kell a skint
-# Minel KEVESEBBET emelkedett a skin, annal jobb a vetel
-SIGNAL_STRONG_MAX = 0.01   # -inf% - +1%  -> "VEDD MEG"
-SIGNAL_MEDIUM_MAX = 0.03   # 1% - 3%      -> "JO VETEL LEHET"
-SIGNAL_WEAK_MAX   = 0.05   # 3% - 5%      -> "FIGYELD"
-# 5% felett mar nem jelzunk, a skin mar kovette a ladat
+SIGNAL_STRONG_MAX = 0.01
+SIGNAL_MEDIUM_MAX = 0.03
+SIGNAL_WEAK_MAX   = 0.05
 
-# 8 napos kovetes ideje masodpercben
 TRACKING_DAYS    = 8
 TRACKING_SECONDS = TRACKING_DAYS * 86400
 
 STEAM_APP_ID   = 730
-STEAM_CURRENCY = 3   # EUR
+STEAM_CURRENCY = 3
+
+MAX_HISTORY_POINTS = 50
+MIN_HISTORY_POINTS = 3
 
 executor = ThreadPoolExecutor(max_workers=2)
 
-# Discord slash command-okhoz
 intents = discord.Intents.default()
 intents.message_content = True
 client  = discord.Client(intents=intents)
@@ -93,15 +88,76 @@ tree    = discord.app_commands.CommandTree(client)
 # -------------------------
 
 last_heartbeat  = 0.0
-previous_prices = {}   # arak az elozo korbol (lada es skin egyutt)
-price_cache     = {}   # cache
-cache_ts        = {}   # cache timestamp
-
-# Manualis skin kovetes (slash command-bol)
-# { "skin_neve": { "start_price": float, "start_time": float, "channel_id": int } }
+previous_prices = {}
+price_cache     = {}
+cache_ts        = {}
 manual_tracking = {}
+loop_started    = False
+price_history   = defaultdict(list)
 
-loop_started = False
+# -------------------------
+# AR HISTORIA
+# -------------------------
+
+def record_price(name, price):
+    price_history[name].append({"ts": time.time(), "price": price})
+    if len(price_history[name]) > MAX_HISTORY_POINTS * 2:
+        price_history[name] = price_history[name][-MAX_HISTORY_POINTS:]
+
+def get_dynamic_history(name):
+    history = price_history.get(name, [])
+    if len(history) == 0:
+        return []
+    if len(history) <= MAX_HISTORY_POINTS:
+        return history
+
+    keep_first = 5
+    keep_last  = 20
+    keep_mid   = MAX_HISTORY_POINTS - keep_first - keep_last
+
+    first_part = history[:keep_first]
+    last_part  = history[-keep_last:]
+    mid_part   = history[keep_first:-keep_last]
+
+    if keep_mid > 0 and len(mid_part) > 0:
+        step = max(1, len(mid_part) // keep_mid)
+        mid_sampled = mid_part[::step][:keep_mid]
+    else:
+        mid_sampled = []
+
+    return first_part + mid_sampled + last_part
+
+def format_history_for_ai(name):
+    history = get_dynamic_history(name)
+    if not history:
+        return None
+
+    lines = []
+    for entry in history:
+        ts_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(entry["ts"]))
+        lines.append(f"  {ts_str} -> {entry['price']:.2f} EUR")
+
+    prices = [e["price"] for e in history]
+    min_p  = min(prices)
+    max_p  = max(prices)
+    avg_p  = sum(prices) / len(prices)
+    first  = prices[0]
+    last   = prices[-1]
+    total_change = ((last - first) / first * 100) if first > 0 else 0
+    volatility   = (max_p - min_p) / avg_p * 100 if avg_p > 0 else 0
+
+    summary = (
+        f"Mérések száma: {len(history)}\n"
+        f"Legalacsonyabb ár: {min_p:.2f} EUR\n"
+        f"Legmagasabb ár: {max_p:.2f} EUR\n"
+        f"Átlagár: {avg_p:.2f} EUR\n"
+        f"Első mért ár: {first:.2f} EUR\n"
+        f"Jelenlegi ár: {last:.2f} EUR\n"
+        f"Teljes változás: {total_change:+.2f}%\n"
+        f"Volatilitás (max-min/avg): {volatility:.2f}%\n"
+    )
+
+    return summary, "\n".join(lines), len(history)
 
 # -------------------------
 # STEAM MARKET API
@@ -166,10 +222,10 @@ async def get_price(name):
     if price is not None:
         price_cache[name] = price
         cache_ts[name]    = now
+        record_price(name, price)
     return price
 
 async def get_price_change(name):
-    """Visszaadja az aktualis arat es a valtozast az elozo korhoz kepest."""
     current = await get_price(name)
     if current is None:
         return None, None
@@ -185,38 +241,124 @@ async def get_price_change(name):
     return current, change
 
 # -------------------------
-# VETEL JELLEMES
+# GOOGLE GEMINI AI
 # -------------------------
 
-def get_signal_label(skin_change):
-    """
-    A skin valtozas alapjan donti el a vetel erosseget.
-    Minel kisebb (vagy negativabb) a skin valtozas, annal jobb a vetel,
-    mert a lada mar emelkedett de a skin meg nem kovette -> nagy a res.
-    """
-    if skin_change <= SIGNAL_STRONG_MAX:
-        return "VEDD MEG"
-    elif skin_change <= SIGNAL_MEDIUM_MAX:
-        return "JO VETEL LEHET"
-    elif skin_change <= SIGNAL_WEAK_MAX:
-        return "FIGYELD"
-    else:
-        return None   # 5%+ felett mar nem jelzunk
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+
+SYSTEM_PROMPT = (
+    "Te egy CS2 Steam Market befektetési elemző bot vagy. "
+    "Kizárólag CS2 skinekre és ládákra adsz tanácsot. "
+    "Adatalapú, tömör, magyar nyelvű válaszokat adsz. "
+    "Minden válaszod tartalmaz: Trend elemzés, Kockázat értékelés (1-5 skála), "
+    "Konkrét ajánlás (Vétel / Várakozás / Eladás), és egy Indoklás részt. "
+    "Soha nem adsz pénzügyi garanciát, mindig kiemeled hogy a piac kiszámíthatatlan. "
+    "Maximum 300 szóban válaszolsz."
+)
+
+def _call_gemini_sync(prompt):
+    """Szinkron Gemini API hívás (threadpool-ban fut)."""
+    try:
+        url = f"{GEMINI_URL}?key={GEMINI_KEY}"
+        body = {
+            "system_instruction": {
+                "parts": [{"text": SYSTEM_PROMPT}]
+            },
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": prompt}]
+                }
+            ],
+            "generationConfig": {
+                "maxOutputTokens": 1000,
+                "temperature": 0.7
+            }
+        }
+        res = requests.post(url, json=body, timeout=30)
+
+        if res.status_code == 429:
+            print("GEMINI RATE LIMIT - napi limit elérve!")
+            return "A napi ingyenes AI limit elérve. Próbáld holnap!"
+
+        if res.status_code != 200:
+            print(f"Gemini API hiba {res.status_code}: {res.text}")
+            return None
+
+        data = res.json()
+        return data["candidates"][0]["content"]["parts"][0]["text"]
+
+    except Exception as e:
+        print(f"Gemini hívás hiba: {e}")
+        return None
+
+async def get_ai_tip(skin_name, current_price):
+    hist_result = format_history_for_ai(skin_name)
+
+    case_name = SKIN_TO_CASE.get(skin_name, "Ismeretlen")
+    case_price = price_cache.get(case_name)
+    case_history_result = format_history_for_ai(case_name) if case_name != "Ismeretlen" else None
+
+    if hist_result is None or hist_result[2] < MIN_HISTORY_POINTS:
+        data_points = hist_result[2] if hist_result else 0
+        return (
+            f"Még nincs elég piaci adat ehhez a skinhez.\n"
+            f"Jelenlegi mérések száma: {data_points} (minimum: {MIN_HISTORY_POINTS})\n"
+            f"Próbáld meg újra később, amikor a bot több adatot gyűjtött!"
+        )
+
+    summary, price_log, n_points = hist_result
+
+    case_context = ""
+    if case_history_result and case_history_result[2] >= MIN_HISTORY_POINTS:
+        c_summary, c_log, c_n = case_history_result
+        case_context = (
+            f"\n\nA LÁDA ADATAI ({case_name}):\n"
+            f"{c_summary}\n"
+            f"Láda árfolyam log:\n{c_log}"
+        )
+        if case_price:
+            case_context += f"\nLáda jelenlegi ára: {case_price:.2f} EUR"
+
+    prompt = (
+        f"Elemezd ezt a CS2 skint befektetési szempontból:\n\n"
+        f"SKIN: {skin_name}\n"
+        f"Jelenlegi ár: {current_price:.2f} EUR\n"
+        f"Ebből a ládából: {case_name}\n\n"
+        f"A SKIN ÁRTÖRTÉNETE (bot által gyűjtött, {n_points} mérés):\n"
+        f"{summary}\n"
+        f"Árfolyam log:\n{price_log}"
+        f"{case_context}\n\n"
+        f"Kérem az elemzést a fenti adatok alapján!"
+    )
+
+    loop   = asyncio.get_running_loop()
+    answer = await loop.run_in_executor(executor, _call_gemini_sync, prompt)
+
+    if answer is None:
+        return "Az AI elemzés jelenleg nem elérhető. Próbáld meg később!"
+
+    return answer
 
 # -------------------------
-# SLASH COMMAND: /skin
+# SLASH COMMAND: /tip
 # -------------------------
 
-@tree.command(name="skin", description="8 napig koveti a megadott skin arat es jelzi a valtozast")
-@discord.app_commands.describe(nev="A skin neve pontosan, pl: AK-47 | Inheritance (Field-Tested)")
-async def skin_command(interaction: discord.Interaction, nev: str):
-    # KRITIKUS: azonnal defer, kulonben Discord timeout (3mp limit)
+@tree.command(name="tip", description="AI alapú befektetési tanács egy skinhez a bot saját piaci adatai alapján")
+@discord.app_commands.describe(nev="A skin neve, pl: AK-47 | Inheritance (Field-Tested)")
+async def tip_command(interaction: discord.Interaction, nev: str):
     await interaction.response.defer()
 
-    # Ellenorizzuk hogy letezik-e a skin a cases.json-ban
+    if not GEMINI_KEY:
+        await interaction.followup.send(
+            "Az AI funkció nincs konfigurálva.\n"
+            "A bot gazdájának be kell állítania a `GEMINI_API_KEY` környezeti változót Render.com-on!\n"
+            "API kulcs: https://aistudio.google.com"
+        )
+        return
+
     found = nev in SKIN_TO_CASE
     if not found:
-        # Kis- nagybetus elteres kiszurese
         for s in SKIN_TO_CASE.keys():
             if s.lower() == nev.lower():
                 nev   = s
@@ -225,14 +367,13 @@ async def skin_command(interaction: discord.Interaction, nev: str):
 
     if not found:
         await interaction.followup.send(
-            f"Nem talaltam ezt a skint a cases.json-ban: `{nev}`\n"
-            f"Ellenorizd a nevet! (pl: `AK-47 | Inheritance`)",
+            f"Nem találtam ezt a skint: `{nev}`\n"
+            f"Ellenőrizd a nevet! (pl: `AK-47 | Inheritance (Field-Tested)`)"
         )
         return
 
-    # Ha a felhasznalo nem adott meg kondiciót, megprobaljuk sorban
     CONDITIONS = [
-        "",  # Eloszor probaljuk condition nelkul
+        "",
         " (Factory New)",
         " (Minimal Wear)",
         " (Field-Tested)",
@@ -244,11 +385,9 @@ async def skin_command(interaction: discord.Interaction, nev: str):
     used_name = nev
 
     if any(cond.strip() in nev for cond in CONDITIONS[1:]):
-        # A felhasznalo mar megadta a kondiciót
         price = await get_price(nev)
         used_name = nev
     else:
-        # Vegigprobaljuk a kondiciokat
         for cond in CONDITIONS:
             test_name = nev + cond
             p = await get_price(test_name)
@@ -259,30 +398,101 @@ async def skin_command(interaction: discord.Interaction, nev: str):
 
     if price is None:
         await interaction.followup.send(
-            f"Nem sikerult az arat lekerni: `{nev}`\n"
-            f"Probald meg a pontos Steam nevet kondicioval, pl:\n"
+            f"Nem sikerült az árat lekérni: `{nev}`\n"
+            f"Próbáld meg a pontos Steam névvel + kondícióval!"
+        )
+        return
+
+    await interaction.followup.send(
+        f"Elemzés folyamatban...\n"
+        f"Skin: `{used_name}` | Jelenlegi ár: `{price:.2f} EUR`\n"
+        f"Az AI most feldolgozza a bot által gyűjtött piaci adatokat..."
+    )
+
+    tip = await get_ai_tip(used_name, price)
+
+    header   = f"**AI ELEMZÉS: {used_name}**\n{'─'*40}\n"
+    full_msg = header + tip
+
+    if len(full_msg) <= 2000:
+        await interaction.channel.send(full_msg)
+    else:
+        await interaction.channel.send(header + tip[:1800] + "...")
+        await interaction.channel.send("..." + tip[1800:])
+
+# -------------------------
+# SLASH COMMAND: /skin
+# -------------------------
+
+@tree.command(name="skin", description="8 napig követi a megadott skin árát és jelzi a változást")
+@discord.app_commands.describe(nev="A skin neve pontosan, pl: AK-47 | Inheritance (Field-Tested)")
+async def skin_command(interaction: discord.Interaction, nev: str):
+    await interaction.response.defer()
+
+    found = nev in SKIN_TO_CASE
+    if not found:
+        for s in SKIN_TO_CASE.keys():
+            if s.lower() == nev.lower():
+                nev   = s
+                found = True
+                break
+
+    if not found:
+        await interaction.followup.send(
+            f"Nem találtam ezt a skint a cases.json-ban: `{nev}`\n"
+            f"Ellenőrizd a nevet! (pl: `AK-47 | Inheritance`)",
+        )
+        return
+
+    CONDITIONS = [
+        "",
+        " (Factory New)",
+        " (Minimal Wear)",
+        " (Field-Tested)",
+        " (Well-Worn)",
+        " (Battle-Scarred)",
+    ]
+
+    price = None
+    used_name = nev
+
+    if any(cond.strip() in nev for cond in CONDITIONS[1:]):
+        price = await get_price(nev)
+        used_name = nev
+    else:
+        for cond in CONDITIONS:
+            test_name = nev + cond
+            p = await get_price(test_name)
+            if p is not None:
+                price = p
+                used_name = test_name
+                break
+
+    if price is None:
+        await interaction.followup.send(
+            f"Nem sikerült az árat lekérni: `{nev}`\n"
+            f"Próbáld meg a pontos Steam névvel kondícióval, pl:\n"
             f"`AK-47 | Inheritance (Field-Tested)`"
         )
         return
 
-    # Kovetes inditasa
     manual_tracking[nev] = {
         "start_price":  price,
         "start_time":   time.time(),
         "channel_id":   interaction.channel_id,
         "reported_8d":  False,
-        "used_name":    used_name  # ezt kell majd lekerdezni 8 nap mulva
+        "used_name":    used_name
     }
 
     await interaction.followup.send(
-        f"Kovetes elindult!\n"
+        f"Követés elindult!\n"
         f"Skin: `{used_name}`\n"
-        f"Jelenlegi ar: {price} EUR\n"
-        f"8 nap mulva kuldok visszajelzest a valtozasrol."
+        f"Jelenlegi ár: {price} EUR\n"
+        f"8 nap múlva küldök visszajelzést a változásról."
     )
 
 # -------------------------
-# MANUALIS KOVETES ELLENORZESE
+# MANUALIS KOVETES
 # -------------------------
 
 async def check_manual_tracking(channel):
@@ -293,8 +503,7 @@ async def check_manual_tracking(channel):
         elapsed = now - data["start_time"]
 
         if elapsed >= TRACKING_SECONDS and not data.get("reported_8d"):
-            # used_name-et hasznaljuk ha van, kulonben a skin kulcsot
-            query_name = data.get("used_name", skin)
+            query_name    = data.get("used_name", skin)
             current_price = await get_price(query_name)
             if current_price is None:
                 continue
@@ -305,20 +514,19 @@ async def check_manual_tracking(channel):
 
             change = (current_price - initial) / initial
             sign   = "+" if change >= 0 else ""
-            irany  = "emelkedett" if change >= 0 else "csokkent"
+            irany  = "emelkedett" if change >= 0 else "csökkent"
 
-            # Uzenet kuldese arra a csatornara ahol a commandot hasznaltak
             try:
                 target_channel = await client.fetch_channel(data["channel_id"])
             except Exception:
                 target_channel = channel
 
             await target_channel.send(
-                f"8 NAPOS VISSZAJELZES\n"
+                f"8 NAPOS VISSZAJELZÉS\n"
                 f"Skin: `{query_name}`\n"
-                f"Indulasi ar: {round(initial, 2)} EUR\n"
-                f"Jelenlegi ar: {round(current_price, 2)} EUR\n"
-                f"Az ar {sign}{round(change * 100, 2)}% {irany} a kovetesi idoszak alatt."
+                f"Indulási ár: {round(initial, 2)} EUR\n"
+                f"Jelenlegi ár: {round(current_price, 2)} EUR\n"
+                f"Az ár {sign}{round(change * 100, 2)}% {irany} a követési időszak alatt."
             )
             manual_tracking[skin]["reported_8d"] = True
             to_delete.append(skin)
@@ -330,21 +538,30 @@ async def check_manual_tracking(channel):
 # FO CIKLUS
 # -------------------------
 
+def get_signal_label(skin_change):
+    if skin_change <= SIGNAL_STRONG_MAX:
+        return "VEDD MEG"
+    elif skin_change <= SIGNAL_MEDIUM_MAX:
+        return "JO VETEL LEHET"
+    elif skin_change <= SIGNAL_WEAK_MAX:
+        return "FIGYELD"
+    else:
+        return None
+
 async def main_loop():
     global last_heartbeat
 
     channel = await client.fetch_channel(CHANNEL_ID)
     await channel.send(
         "CS2 Trading Bot online!\n"
-        "Ladak es skinek: Steam Market API\n"
+        "Ladak es skinek: Steam Market API | AI: Google Gemini (ingyenes)\n"
         f"{len(ALL_CASES)} lada figyelese aktiv\n"
-        "Slash command: /skin [nev] - 8 napos kovetes"
+        "Slash commandok: /skin [nev] - 8 napos kovetes | /tip [nev] - AI elemzes"
     )
 
-    # --- INDULASKORI AR ELLENORZES ---
     await channel.send("Ladak aktualis arainak lekerdezese indul...")
-    ar_uzenet = ""
-    sikeres   = 0
+    ar_uzenet  = ""
+    sikeres    = 0
     sikertelen = 0
     for case in ALL_CASES:
         price = await get_price(case)
@@ -362,35 +579,26 @@ async def main_loop():
     await channel.send(
         f"Ar lekerdezes kesz: {sikeres} sikeres, {sikertelen} sikertelen"
     )
-    # -------------------------------------------------
 
     while True:
         try:
             current_time = time.time()
 
-            # Heartbeat
             if current_time - last_heartbeat > 3600:
                 await channel.send("Bot online es figyel!")
                 last_heartbeat = current_time
 
-            # Manualis kovetes ellenorzese
             await check_manual_tracking(channel)
 
-            # ----------------------------------
-            # FO LOGIKA: Lada + Skin figyelese
-            # ----------------------------------
             for case in ALL_CASES:
                 case_price, case_change = await get_price_change(case)
 
                 if case_price is None or case_change is None:
-                    # Elso kor, meg nincs mihez hasonlitani
                     continue
 
-                # Ha a lada ara NEM emelkedett 8%-ot, kihagyjuk
                 if case_change < CASE_RISE_THRESHOLD:
                     continue
 
-                # Lada 8%+ emelkedett -> megnezzuk a skineket
                 skins = CASE_SKINS.get(case, [])
                 for skin in skins:
                     skin_price, skin_change = await get_price_change(skin)
@@ -398,8 +606,6 @@ async def main_loop():
                     if skin_price is None or skin_change is None:
                         continue
 
-                    # Jel meghatarozasa a skin valtozasa alapjan
-                    # Ha a skin mar 5%+ emelkedett, nem jelzunk (elkesett)
                     label = get_signal_label(skin_change)
                     if label is None:
                         continue
@@ -430,7 +636,6 @@ async def main_loop():
 async def on_ready():
     global loop_started
     print(f"Bot bejelentkezve: {client.user}")
-    # Slash commandok szinkronizalasa
     try:
         synced = await tree.sync()
         print(f"Slash commandok szinkronizalva: {len(synced)} db")
