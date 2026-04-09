@@ -364,21 +364,32 @@ def _call_gemini_sync(prompt, max_tokens=1000):
                 "temperature": 0.7
             }
         }
-        res = requests.post(url, json=body, timeout=40)
 
-        if res.status_code == 429:
-            print("GEMINI RATE LIMIT!")
-            return "A napi ingyenes AI limit elérve. Próbáld holnap!"
+        for attempt in range(3):
+            res = requests.post(url, json=body, timeout=40)
 
-        if res.status_code != 200:
-            print(f"Gemini API hiba {res.status_code}: {res.text}")
-            return None
+            if res.status_code == 200:
+                data = res.json()
+                candidates = data.get("candidates", [])
+                if not candidates:
+                    print(f"Gemini: ures candidates. Valasz: {data}")
+                    return "Az AI nem tudott valaszt generalni. Probald ujra!"
+                return candidates[0]["content"]["parts"][0]["text"]
 
-        data = res.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"]
+            elif res.status_code == 429:
+                wait = 15 * (attempt + 1)
+                print(f"GEMINI RATE LIMIT! Varakozas {wait}s... (proba {attempt+1}/3)")
+                time.sleep(wait)
+                continue
+
+            else:
+                print(f"Gemini API hiba {res.status_code}: {res.text[:300]}")
+                return None
+
+        return "Az AI percenkenti limit elerte (15 keres/perc). Varj ~1 percet es probald ujra!"
 
     except Exception as e:
-        print(f"Gemini hívás hiba: {e}")
+        print(f"Gemini hivas hiba: {e}")
         return None
 
 async def get_ai_tip(skin_name, current_price):
@@ -494,13 +505,27 @@ async def tip_command(interaction: discord.Interaction, nev: str):
     # ----------------------------------
     # /tip [skin neve] - egyedi elemzés
     # ----------------------------------
-    found = nev in SKIN_TO_CASE
+    # Kondíciót levágjuk a kereséshez (pl "AK-47 | Redline (Field-Tested)" -> "AK-47 | Redline")
+    COND_LIST = [" (Factory New)", " (Minimal Wear)", " (Field-Tested)", " (Well-Worn)", " (Battle-Scarred)"]
+    base_nev = nev
+    for c in COND_LIST:
+        if nev.endswith(c):
+            base_nev = nev[:-len(c)]
+            break
+
+    found = base_nev in SKIN_TO_CASE
     if not found:
         for s in SKIN_TO_CASE.keys():
-            if s.lower() == nev.lower():
-                nev   = s
-                found = True
+            if s.lower() == base_nev.lower():
+                base_nev = s
+                found    = True
                 break
+
+    # Ha kondícióval adta meg, visszarakjuk
+    if found and base_nev != nev:
+        nev = nev  # megtartjuk az eredetit kondícióval
+    elif found:
+        nev = base_nev
 
     if not found:
         await interaction.followup.send(
