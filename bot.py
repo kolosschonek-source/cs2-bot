@@ -1,6 +1,7 @@
 import os
 import threading
 import time
+import random
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import requests
 import discord
@@ -8,6 +9,7 @@ import asyncio
 import json
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 
 # -------------------------
 # HTTP SZERVER (Render + UptimeRobot)
@@ -76,7 +78,135 @@ STEAM_CURRENCY = 3
 MAX_HISTORY_POINTS = 50
 MIN_HISTORY_POINTS = 3
 
-executor = ThreadPoolExecutor(max_workers=2)
+# -------------------------
+# GEMINI RATE LIMIT MANAGER
+# -------------------------
+# Gemini 2.0 Flash free tier: 1500 RPD, 15 RPM
+# Biztonsagi hatarokat hasznalunk hogy ne futunk ki
+
+GEMINI_MODEL        = "gemini-2.0-flash"
+GEMINI_RPD_LIMIT    = 1400   # 1500-bol 100-at tartalekban tartunk
+GEMINI_RPM_LIMIT    = 12     # 15-bol 3-at tartalekban tartunk
+GEMINI_COOLDOWN_SEC = 5      # keres kozotti minimum varakozas (smooth UX)
+
+# AI valasz cache - 30 percig cacheli ugyanazt a skint
+AI_CACHE_TTL        = 1800   # masodpercben
+ai_response_cache   = {}     # {"skin_name": {"ts": ..., "response": ...}}
+ai_cache_lock       = threading.Lock()
+
+# RPD es RPM szamlalok
+gemini_stats = {
+    "requests_today": 0,
+    "day_reset_ts":   0.0,     # mikor resetelodott utoljara
+    "requests_this_minute": 0,
+    "minute_reset_ts": 0.0,
+    "last_request_ts": 0.0,
+    "total_blocked":  0,       # hany keres lett blokkolva limit miatt
+}
+gemini_lock = threading.Lock()
+
+def _reset_gemini_daily_if_needed():
+    """Napi szamlalo resetelese ha uj nap van (UTC ejfel)."""
+    now = time.time()
+    today_midnight = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ).timestamp()
+    with gemini_lock:
+        if gemini_stats["day_reset_ts"] < today_midnight:
+            gemini_stats["requests_today"]  = 0
+            gemini_stats["day_reset_ts"]    = today_midnight
+            print(f"[GEMINI] Napi szamlalo resetelve. Uj nap: {datetime.now(timezone.utc).strftime('%Y-%m-%d')}")
+
+def _check_gemini_rate_limit():
+    """
+    Megvizsgalja hogy lehet-e most Gemini kerest kuldeni.
+    Visszater: (mehet: bool, uzenet: str | None)
+    """
+    _reset_gemini_daily_if_needed()
+    now = time.time()
+
+    with gemini_lock:
+        # Napi limit
+        if gemini_stats["requests_today"] >= GEMINI_RPD_LIMIT:
+            remaining = 86400 - (now - gemini_stats["day_reset_ts"])
+            h = int(remaining // 3600)
+            m = int((remaining % 3600) // 60)
+            gemini_stats["total_blocked"] += 1
+            return False, (
+                f"Az AI napi limitet elerte ({GEMINI_RPD_LIMIT} keres/nap).\n"
+                f"Reset: kb. {h} ora {m} perc mulva (UTC ejfel).\n"
+                f"Holnap elolrol indul a szamlalo!"
+            )
+
+        # Percenkenti limit - ablak reset
+        if now - gemini_stats["minute_reset_ts"] >= 60:
+            gemini_stats["requests_this_minute"] = 0
+            gemini_stats["minute_reset_ts"]      = now
+
+        if gemini_stats["requests_this_minute"] >= GEMINI_RPM_LIMIT:
+            wait = 60 - (now - gemini_stats["minute_reset_ts"])
+            gemini_stats["total_blocked"] += 1
+            return False, (
+                f"Tul sok keres egyszerre (max {GEMINI_RPM_LIMIT}/perc).\n"
+                f"Varj meg ~{int(wait)+1} masodpercet, utana probald ujra!"
+            )
+
+        # Minimum varakozas keres kozott (smooth, nem spammelunk)
+        since_last = now - gemini_stats["last_request_ts"]
+        if since_last < GEMINI_COOLDOWN_SEC:
+            wait = GEMINI_COOLDOWN_SEC - since_last
+            gemini_stats["total_blocked"] += 1
+            return False, (
+                f"Kicsit gyors vagy! Varj meg {wait:.1f} masodpercet es probald ujra."
+            )
+
+        return True, None
+
+def _increment_gemini_counter():
+    """Sikeres keres utan noveli a szamlalokat."""
+    now = time.time()
+    with gemini_lock:
+        gemini_stats["requests_today"]      += 1
+        gemini_stats["requests_this_minute"] += 1
+        gemini_stats["last_request_ts"]      = now
+
+def get_gemini_status():
+    """Visszaadja az aktualis Gemini hasznalati statisztikakat (szovegesen)."""
+    _reset_gemini_daily_if_needed()
+    with gemini_lock:
+        remaining_today = GEMINI_RPD_LIMIT - gemini_stats["requests_today"]
+        used_today      = gemini_stats["requests_today"]
+        blocked         = gemini_stats["total_blocked"]
+    return (
+        f"**Gemini API statisztika:**\n"
+        f"• Felhasznalt keres ma: {used_today} / {GEMINI_RPD_LIMIT}\n"
+        f"• Maradek keres ma: {remaining_today}\n"
+        f"• Blokkolt keres: {blocked}\n"
+        f"• Reset: UTC ejfelkor"
+    )
+
+# -------------------------
+# AI VALASZ CACHE
+# -------------------------
+
+def get_cached_ai_response(key):
+    """Visszaadja a cachelt valaszt ha meg friss, egyebkent None."""
+    with ai_cache_lock:
+        entry = ai_response_cache.get(key)
+        if entry and (time.time() - entry["ts"]) < AI_CACHE_TTL:
+            return entry["response"], entry["ts"]
+    return None, None
+
+def set_cached_ai_response(key, response):
+    """Elmenti az AI valaszt a cache-be."""
+    with ai_cache_lock:
+        ai_response_cache[key] = {"ts": time.time(), "response": response}
+
+# -------------------------
+# EXECUTOR ES DISCORD SETUP
+# -------------------------
+
+executor = ThreadPoolExecutor(max_workers=3)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -120,7 +250,7 @@ def get_dynamic_history(name):
     mid_part   = history[keep_first:-keep_last]
 
     if keep_mid > 0 and len(mid_part) > 0:
-        step = max(1, len(mid_part) // keep_mid)
+        step        = max(1, len(mid_part) // keep_mid)
         mid_sampled = mid_part[::step][:keep_mid]
     else:
         mid_sampled = []
@@ -128,6 +258,10 @@ def get_dynamic_history(name):
     return first_part + mid_sampled + last_part
 
 def format_history_for_ai(name):
+    """
+    Visszater egy (summary_str, price_log_str, n_points) tuplevval,
+    vagy None-nal ha nincs adat.
+    """
     history = get_dynamic_history(name)
     if not history:
         return None
@@ -147,14 +281,14 @@ def format_history_for_ai(name):
     volatility   = (max_p - min_p) / avg_p * 100 if avg_p > 0 else 0
 
     summary = (
-        f"Mérések száma: {len(history)}\n"
-        f"Legalacsonyabb ár: {min_p:.2f} EUR\n"
-        f"Legmagasabb ár: {max_p:.2f} EUR\n"
-        f"Átlagár: {avg_p:.2f} EUR\n"
-        f"Első mért ár: {first:.2f} EUR\n"
-        f"Jelenlegi ár: {last:.2f} EUR\n"
-        f"Teljes változás: {total_change:+.2f}%\n"
-        f"Volatilitás (max-min/avg): {volatility:.2f}%\n"
+        f"Meresek szama: {len(history)}\n"
+        f"Legalacsonyabb ar: {min_p:.2f} EUR\n"
+        f"Legmagasabb ar: {max_p:.2f} EUR\n"
+        f"Atlacar: {avg_p:.2f} EUR\n"
+        f"Elso mert ar: {first:.2f} EUR\n"
+        f"Jelenlegi ar: {last:.2f} EUR\n"
+        f"Teljes valtozas: {total_change:+.2f}%\n"
+        f"Volatilitas (max-min/avg): {volatility:.2f}%\n"
     )
 
     return summary, "\n".join(lines), len(history)
@@ -164,13 +298,8 @@ def format_history_for_ai(name):
 # -------------------------
 
 def build_market_snapshot():
-    """
-    Összegyűjti az összes ládáról és skinről elérhető trend adatot.
-    Visszaad egy szöveges összefoglalót az AI számára,
-    és egy rendezett listát a legjobb vételi lehetőségekről.
-    """
     case_summaries  = []
-    skin_candidates = []   # (skin_neve, lada_neve, total_change, volatility, current_price, n_points)
+    skin_candidates = []
 
     for case in ALL_CASES:
         hist = format_history_for_ai(case)
@@ -184,11 +313,10 @@ def build_market_snapshot():
         total_change = ((last - first) / first * 100) if first > 0 else 0
 
         case_summaries.append(
-            f"LÁDA: {case} | Változás: {total_change:+.2f}% | "
-            f"Jelenlegi ár: {last:.2f} EUR | Mérések: {n}"
+            f"LADA: {case} | Valtozas: {total_change:+.2f}% | "
+            f"Jelenlegi ar: {last:.2f} EUR | Meresek: {n}"
         )
 
-        # Skineket is megvizsgáljuk
         for skin in CASE_SKINS.get(case, []):
             sh = format_history_for_ai(skin)
             if sh is None or sh[2] < MIN_HISTORY_POINTS:
@@ -206,50 +334,42 @@ def build_market_snapshot():
 
             skin_candidates.append((skin, case, s_change, s_volatility, s_last, s_n))
 
-    # Rendezés: legjobb vételi lehetőség = láda emelkedett, skin még nem
-    # Prioritás: alacsony skin_change (még nem követte a ládát) + alacsony volatilitás
     skin_candidates.sort(key=lambda x: (x[2], x[3]))
-
     return case_summaries, skin_candidates
 
 def format_general_prompt(case_summaries, skin_candidates):
-    """Összeállítja az AI promptot a general elemzéshez."""
-
-    # Láda összefoglaló szekció
     if case_summaries:
-        case_section = "LÁDÁK PIACI ÁTTEKINTÉSE:\n" + "\n".join(case_summaries)
+        case_section = "LADAK PIACI ATTEKINTESE:\n" + "\n".join(case_summaries)
     else:
-        case_section = "LÁDÁK: Még nincs elég adat."
+        case_section = "LADAK: Meg nincs eleg adat."
 
-    # Top 10 skin jelölt az AI-nak (hogy ne legyen túl hosszú a prompt)
     if skin_candidates:
         skin_lines = []
         for skin, case, change, vol, price, n in skin_candidates[:10]:
             skin_lines.append(
-                f"  - {skin} (ládából: {case}) | "
-                f"Változás: {change:+.2f}% | "
-                f"Volatilitás: {vol:.1f}% | "
-                f"Jelenlegi ár: {price:.2f} EUR | "
-                f"Mérések: {n}"
+                f"  - {skin} (ladabol: {case}) | "
+                f"Valtozas: {change:+.2f}% | "
+                f"Volatilitas: {vol:.1f}% | "
+                f"Jelenlegi ar: {price:.2f} EUR | "
+                f"Meresek: {n}"
             )
-        skin_section = "SKIN JELÖLTEK (változás szerint rendezve, legkisebb elől):\n" + "\n".join(skin_lines)
+        skin_section = "SKIN JELOLTEK (valtozas szerint rendezve, legkisebb elol):\n" + "\n".join(skin_lines)
     else:
-        skin_section = "SKINEK: Még nincs elég adat."
+        skin_section = "SKINEK: Meg nincs eleg adat."
 
     prompt = (
-        f"Az alábbiakban egy CS2 trading bot által gyűjtött VALÓS piaci adatok láthatók.\n"
-        f"Kérlek végezz teljes piaci elemzést!\n\n"
+        f"Az alabbiakban egy CS2 trading bot altal gyujtott VALOS piaci adatok lathatoak.\n"
+        f"Kerlek vegezz teljes piaci elemzest!\n\n"
         f"{case_section}\n\n"
         f"{skin_section}\n\n"
         f"FELADATOD:\n"
-        f"1. PIACI ÖSSZKÉPE: Rövid összefoglalás a jelenlegi CS2 piac állapotáról a fenti adatok alapján.\n"
-        f"2. TOP 3 VÉTEL: Melyik 3 skin a legjobb vételi lehetőség MOST és miért? "
-        f"(Figyelj a láda vs skin ár különbségre - ha a láda emelkedett de a skin még nem, az a legjobb jel!)\n"
-        f"3. KOCKÁZATOS SKINEK: Melyiket kerüljük most és miért?\n"
-        f"4. ÁLTALÁNOS TANÁCS: Mit érdemes figyelni a következő napokban?\n\n"
-        f"Legyél konkrét, adatalapú és tömör!"
+        f"1. PIACI OSSZKEPE: Rovid osszefoglalas a jelenlegi CS2 piac allapatarol.\n"
+        f"2. TOP 3 VETEL: Melyik 3 skin a legjobb vetel MOST es miert? "
+        f"(Ha a lada emelkedett de a skin meg nem, az a legjobb jel!)\n"
+        f"3. KOCKAZATOS SKINEK: Melyiket keruluk most es miert?\n"
+        f"4. ALTALANOS TANACS: Mit erdemes figyelni a kovetkezo napokban?\n\n"
+        f"Legyel konkret, adatalapu es tomorl! Max 400 szo."
     )
-
     return prompt
 
 # -------------------------
@@ -262,8 +382,8 @@ def _fetch_steam_price_sync(market_hash_name):
     try:
         time.sleep(STEAM_REQUEST_DELAY)
         params = {
-            "appid": STEAM_APP_ID,
-            "currency": STEAM_CURRENCY,
+            "appid":            STEAM_APP_ID,
+            "currency":         STEAM_CURRENCY,
             "market_hash_name": market_hash_name
         }
         headers = {
@@ -334,19 +454,28 @@ async def get_price_change(name):
     return current, change
 
 # -------------------------
-# GOOGLE GEMINI AI
+# GOOGLE GEMINI AI - ALAP HIVAS
 # -------------------------
 
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 SYSTEM_PROMPT = (
-    "Te egy CS2 Steam Market befektetési elemző bot vagy. "
-    "Kizárólag CS2 skinekre és ládákra adsz tanácsot. "
-    "Adatalapú, tömör, magyar nyelvű válaszokat adsz. "
-    "Soha nem adsz pénzügyi garanciát, mindig kiemeled hogy a piac kiszámíthatatlan."
+    "Te egy CS2 Steam Market befektetesi elemzo bot vagy. "
+    "Kizarolag CS2 skinekre es ladakra adsz tacsacot. "
+    "Adatalapu, tomor, magyar nyelvu valaszokat adsz. "
+    "Soha nem adsz penzugyi garantiat, mindig kiemeled hogy a piac kiszamithatatlan. "
+    "Valaszaid strukturaltak, emojikkal olvashatok es tomorek."
 )
 
-def _call_gemini_sync(prompt, max_tokens=1000):
+def _call_gemini_sync(prompt, max_tokens=1200):
+    """
+    Alacsony szintu Gemini hivas.
+    Visszater a szoveges valasszal, vagy None-nal hiba eseten.
+    Nem kezeli a rate limiteket - azt a hivo felnek kell.
+    """
+    if not GEMINI_KEY:
+        return None
+
     try:
         url  = f"{GEMINI_URL}?key={GEMINI_KEY}"
         body = {
@@ -355,162 +484,433 @@ def _call_gemini_sync(prompt, max_tokens=1000):
             },
             "contents": [
                 {
-                    "role": "user",
+                    "role":  "user",
                     "parts": [{"text": prompt}]
                 }
             ],
             "generationConfig": {
                 "maxOutputTokens": max_tokens,
-                "temperature": 0.7
+                "temperature":     0.75
             }
         }
 
         for attempt in range(3):
-            res = requests.post(url, json=body, timeout=40)
+            res = requests.post(url, json=body, timeout=45)
 
             if res.status_code == 200:
-                data = res.json()
+                data       = res.json()
                 candidates = data.get("candidates", [])
                 if not candidates:
-                    print(f"Gemini: ures candidates. Valasz: {data}")
+                    print(f"[GEMINI] Ures candidates. Valasz: {data}")
                     return "Az AI nem tudott valaszt generalni. Probald ujra!"
                 return candidates[0]["content"]["parts"][0]["text"]
 
             elif res.status_code == 429:
-                wait = 15 * (attempt + 1)
-                print(f"GEMINI RATE LIMIT! Varakozas {wait}s... (proba {attempt+1}/3)")
+                wait = 20 * (attempt + 1)
+                print(f"[GEMINI] 429 Rate limit! Varakozas {wait}s... ({attempt+1}/3)")
+                time.sleep(wait)
+                continue
+
+            elif res.status_code == 503:
+                wait = 10 * (attempt + 1)
+                print(f"[GEMINI] 503 Szerver tulterhelt. Varakozas {wait}s...")
                 time.sleep(wait)
                 continue
 
             else:
-                print(f"Gemini API hiba {res.status_code}: {res.text[:300]}")
+                print(f"[GEMINI] API hiba {res.status_code}: {res.text[:300]}")
                 return None
 
-        return "Az AI percenkenti limit elerte (15 keres/perc). Varj ~1 percet es probald ujra!"
-
-    except Exception as e:
-        print(f"Gemini hivas hiba: {e}")
         return None
 
-async def get_ai_tip(skin_name, current_price):
+    except Exception as e:
+        print(f"[GEMINI] Hivas hiba: {e}")
+        return None
+
+# =====================================================================
+# 3 TRADER SZEMÉLYISÉG + SCORE RENDSZER
+# =====================================================================
+#
+# A bot harom kulonbozo trader "szemuvegen" at elemzi a skint:
+#
+#  1. HODOR  (hosszutavu, ovatos)  - csak akkor vesz ha biztosan jo
+#  2. FLIPPER (agressziv, gyors)   - gyors ar-mozgasra jatszik
+#  3. ANALYST (technikai elemzes)  - volatilitas, trend, pattern
+#
+# Mindegyik ad egy velemeny (Vetel / Varj / Elad) es egy
+# indoklast. A vegso score 0-100 kozott van:
+#  80-100 : Eros vetel
+#  60-79  : Jo vetel lehet
+#  40-59  : Semleges / figyelj
+#  20-39  : Varj
+#   0-19  : Kerulend
+#
+# =====================================================================
+
+HODOR_PROMPT = """Te HODOR vagy, egy ultra-ovatos, hosszutavu CS2 befekteto.
+Csak akkor javasolsz vetelre ha:
+- Az ar legalabb 3+ merest mutat stabil vagy emelkedo trendet
+- A volatilitas alacsony (kiszamithato mozgas)
+- A lada mar emelkedett de a skin meg nem kovetele azt (divergencia)
+- A jelenlegi ar a tortenet atlag ALATT van (alul-ertekelt)
+
+Valaszod PONTOSAN ebben a formatumban legyen (semmi mas):
+HODOR_VELEMENYE: [VETEL / VARJ / ELAD]
+HODOR_INDOKLAS: [max 2 mondat miert]
+HODOR_BIZALMI_SZINT: [1-10]
+"""
+
+FLIPPER_PROMPT = """Te FLIPPER vagy, egy agressziv, gyors CS2 skin flipper.
+Mindig a rovid tavu ar-mozgasra jatszol:
+- Ha az ar az utolso mereseken emelkedik: vetel (momentum)
+- Ha a lada emelkedett es a skin elmaradt: azonnali vetel (divergencia play)
+- Ha az ar atlag felett van es emelkedik: lehet elad (profit take)
+- Nem erdekel a hosszu tavon, csak a kovetkezo 1-3 nap
+
+Valaszod PONTOSAN ebben a formatumban legyen (semmi mas):
+FLIPPER_VELEMENYE: [VETEL / VARJ / ELAD]
+FLIPPER_INDOKLAS: [max 2 mondat miert]
+FLIPPER_BIZALMI_SZINT: [1-10]
+"""
+
+ANALYST_PROMPT = """Te ANALYST vagy, egy hidegeveru technikai elemzo.
+Szamok alapjan dolgozol:
+- Volatilitas: ha > 30% akkor kockazatos, ha < 10% akkor stabil
+- Trend: elso vs utolso ar osszehasonlitasa (emelkedo / csokeno / oldalaz)
+- Support szint: a meresek minimuma = tamasz ar
+- Divergencia ertek: (lada_valtozas - skin_valtozas) -> minnel nagyobb, annal jobb lehetoseg
+
+Valaszod PONTOSAN ebben a formatumban legyen (semmi mas):
+ANALYST_VELEMENYE: [VETEL / VARJ / ELAD]
+ANALYST_INDOKLAS: [max 2 mondat miert]
+ANALYST_SCORE: [0-100, ahol 100 = tokeletes vetel]
+"""
+
+def _build_skin_data_block(skin_name, current_price):
+    """Osszeallitja az adatblokkot amit mindegyik trader megkap."""
     hist_result = format_history_for_ai(skin_name)
+    case_name   = SKIN_TO_CASE.get(skin_name, "Ismeretlen")
+    case_hist   = format_history_for_ai(case_name) if case_name != "Ismeretlen" else None
 
-    case_name            = SKIN_TO_CASE.get(skin_name, "Ismeretlen")
-    case_price           = price_cache.get(case_name)
-    case_history_result  = format_history_for_ai(case_name) if case_name != "Ismeretlen" else None
-
-    if hist_result is None or hist_result[2] < MIN_HISTORY_POINTS:
-        data_points = hist_result[2] if hist_result else 0
-        return (
-            f"Még nincs elég piaci adat ehhez a skinhez.\n"
-            f"Jelenlegi mérések száma: {data_points} (minimum: {MIN_HISTORY_POINTS})\n"
-            f"Próbáld meg újra később!"
-        )
+    if hist_result is None:
+        return None, 0
 
     summary, price_log, n_points = hist_result
 
-    case_context = ""
-    if case_history_result and case_history_result[2] >= MIN_HISTORY_POINTS:
-        c_summary, c_log, c_n = case_history_result
-        case_context = (
-            f"\n\nA LÁDA ADATAI ({case_name}):\n"
+    # Lada adatok
+    case_block = ""
+    case_change_pct = 0.0
+    if case_hist and case_hist[2] >= MIN_HISTORY_POINTS:
+        c_summary, c_log, c_n = case_hist
+        c_prices    = [e["price"] for e in get_dynamic_history(case_name)]
+        c_first     = c_prices[0]
+        c_last      = c_prices[-1]
+        case_change_pct = ((c_last - c_first) / c_first * 100) if c_first > 0 else 0
+        case_block = (
+            f"\nA LADA ADATAI ({case_name}):\n"
             f"{c_summary}\n"
-            f"Láda árfolyam log:\n{c_log}"
+            f"Lada ar-valtozas: {case_change_pct:+.2f}%"
         )
-        if case_price:
-            case_context += f"\nLáda jelenlegi ára: {case_price:.2f} EUR"
 
-    prompt = (
-        f"Elemezd ezt a CS2 skint befektetési szempontból:\n\n"
+    # Skin ar-valtozas szamolas
+    skin_prices = [e["price"] for e in get_dynamic_history(skin_name)]
+    s_first     = skin_prices[0] if skin_prices else current_price
+    skin_change_pct = ((current_price - s_first) / s_first * 100) if s_first > 0 else 0
+
+    divergencia = case_change_pct - skin_change_pct
+
+    data_block = (
         f"SKIN: {skin_name}\n"
-        f"Jelenlegi ár: {current_price:.2f} EUR\n"
-        f"Ebből a ládából: {case_name}\n\n"
-        f"A SKIN ÁRTÖRTÉNETE ({n_points} mérés):\n"
+        f"Lada: {case_name}\n"
+        f"Jelenlegi ar: {current_price:.2f} EUR\n"
+        f"Skin ar-valtozas (osszes meres): {skin_change_pct:+.2f}%\n"
+        f"Divergencia (lada minus skin valtozas): {divergencia:+.2f}% "
+        f"{'(pozitiv = lada megelozi a skint = JO JEL)' if divergencia > 0 else ''}\n\n"
+        f"SKIN ARTORTENETE ({n_points} meres):\n"
         f"{summary}\n"
-        f"Árfolyam log:\n{price_log}"
-        f"{case_context}\n\n"
-        f"Add meg: Trend elemzés, Kockázat (1-5), Ajánlás (Vétel/Várakozás/Eladás), Indoklás. Max 300 szó."
+        f"Arfolyam log:\n{price_log}"
+        f"{case_block}"
     )
 
-    loop   = asyncio.get_running_loop()
-    answer = await loop.run_in_executor(executor, _call_gemini_sync, prompt, 1000)
+    return data_block, n_points
 
-    return answer if answer else "Az AI elemzés jelenleg nem elérhető. Próbáld meg később!"
+def _parse_trader_response(text, trader_name):
+    """
+    Kiolvassa a trader valaszabol a veleményt es a bizalmi szintet.
+    Visszater: (velemeny: str, indoklas: str, score: int)
+    """
+    lines      = text.strip().split("\n")
+    velemeny   = "VARJ"
+    indoklas   = "Nem sikerult elemezni."
+    raw_score  = 5
+
+    prefix_map = {
+        "HODOR":   ("HODOR_VELEMENYE:", "HODOR_INDOKLAS:", "HODOR_BIZALMI_SZINT:"),
+        "FLIPPER": ("FLIPPER_VELEMENYE:", "FLIPPER_INDOKLAS:", "FLIPPER_BIZALMI_SZINT:"),
+        "ANALYST": ("ANALYST_VELEMENYE:", "ANALYST_INDOKLAS:", "ANALYST_SCORE:"),
+    }
+
+    pv, pi, ps = prefix_map.get(trader_name, ("", "", ""))
+
+    for line in lines:
+        line = line.strip()
+        if line.startswith(pv):
+            val = line[len(pv):].strip().upper()
+            if "VETEL" in val:
+                velemeny = "VETEL"
+            elif "ELAD" in val:
+                velemeny = "ELAD"
+            else:
+                velemeny = "VARJ"
+        elif line.startswith(pi):
+            indoklas = line[len(pi):].strip()
+        elif line.startswith(ps):
+            try:
+                raw_score = int("".join(c for c in line[len(ps):] if c.isdigit())[:3])
+                raw_score = max(1, min(10 if trader_name != "ANALYST" else 100, raw_score))
+            except Exception:
+                raw_score = 5
+
+    return velemeny, indoklas, raw_score
+
+def _velemeny_to_score(velemeny, raw_score, trader_name):
+    """
+    Atvalositja a veleményt egy 0-100 skalaira.
+    Analyst mar 0-100-at ad, Hodor/Flipper 1-10-et.
+    """
+    if trader_name == "ANALYST":
+        return max(0, min(100, raw_score))
+
+    # Hodor / Flipper: 1-10 bizalmi szint -> velemeny alapjan skalalas
+    if velemeny == "VETEL":
+        base = 60
+        bonus = (raw_score - 1) * (40 / 9)   # 60-100 kozotti skala
+    elif velemeny == "VARJ":
+        base = 30
+        bonus = (raw_score - 1) * (20 / 9)   # 30-50 kozotti skala
+    else:  # ELAD
+        base = 0
+        bonus = (raw_score - 1) * (20 / 9)   # 0-20 kozotti skala
+
+    return max(0, min(100, int(base + bonus)))
+
+def _score_to_label(score):
+    if score >= 80:
+        return "🟢 EROS VETEL"
+    elif score >= 60:
+        return "🟡 JO VETEL LEHET"
+    elif score >= 40:
+        return "🟠 SEMLEGES / FIGYELJ"
+    elif score >= 20:
+        return "🔴 VARJ"
+    else:
+        return "⛔ KERULEND"
+
+def _call_gemini_trader(data_block, trader_prompt, trader_name, max_tokens=300):
+    """Egy trader szemelyre szolo Gemini hivas."""
+    prompt = f"{trader_prompt}\n\nPIACI ADATOK:\n{data_block}"
+    result = _call_gemini_sync(prompt, max_tokens=max_tokens)
+    return result
+
+async def get_ai_tip_full(skin_name, current_price):
+    """
+    A fo AI elemzesi fuggveny.
+    Harom Gemini hivas (3 trader), majd osszevont score es megjelenitcs.
+    AI cache-t hasznal - 30 percig ugyanazt adja vissza.
+    """
+    # Cache ellenorzese
+    cache_key      = f"tip_{skin_name}"
+    cached, cached_ts = get_cached_ai_response(cache_key)
+    if cached:
+        age_min = int((time.time() - cached_ts) / 60)
+        return cached + f"\n\n*(Cache-elt valasz, {age_min} perce)*"
+
+    # Rate limit ellenorzese - harom hivas kell, ellenorizzuk elore
+    can_go, limit_msg = _check_gemini_rate_limit()
+    if not can_go:
+        return f"⏳ **Rate limit:**\n{limit_msg}"
+
+    # Adatblokk osszeallitasa
+    data_block, n_points = _build_skin_data_block(skin_name, current_price)
+    if data_block is None or n_points < MIN_HISTORY_POINTS:
+        dp = n_points if data_block else 0
+        return (
+            f"Meg nincs eleg piaci adat ehhez a skinhez.\n"
+            f"Jelenlegi meresek szama: {dp} (minimum: {MIN_HISTORY_POINTS})\n"
+            f"Probald meg ujra kesobb!"
+        )
+
+    loop = asyncio.get_running_loop()
+
+    # --- HODOR hivas ---
+    can_go, limit_msg = _check_gemini_rate_limit()
+    if not can_go:
+        return f"⏳ **Rate limit (HODOR keres):**\n{limit_msg}"
+    _increment_gemini_counter()
+    hodor_raw = await loop.run_in_executor(
+        executor, _call_gemini_trader, data_block, HODOR_PROMPT, "HODOR", 250
+    )
+    await asyncio.sleep(GEMINI_COOLDOWN_SEC)
+
+    # --- FLIPPER hivas ---
+    can_go, limit_msg = _check_gemini_rate_limit()
+    if not can_go:
+        return f"⏳ **Rate limit (FLIPPER keres):**\n{limit_msg}"
+    _increment_gemini_counter()
+    flipper_raw = await loop.run_in_executor(
+        executor, _call_gemini_trader, data_block, FLIPPER_PROMPT, "FLIPPER", 250
+    )
+    await asyncio.sleep(GEMINI_COOLDOWN_SEC)
+
+    # --- ANALYST hivas ---
+    can_go, limit_msg = _check_gemini_rate_limit()
+    if not can_go:
+        return f"⏳ **Rate limit (ANALYST keres):**\n{limit_msg}"
+    _increment_gemini_counter()
+    analyst_raw = await loop.run_in_executor(
+        executor, _call_gemini_trader, data_block, ANALYST_PROMPT, "ANALYST", 300
+    )
+
+    # Parseolas
+    hodor_v,   hodor_i,   hodor_s   = _parse_trader_response(hodor_raw or "",   "HODOR")
+    flipper_v, flipper_i, flipper_s = _parse_trader_response(flipper_raw or "", "FLIPPER")
+    analyst_v, analyst_i, analyst_s = _parse_trader_response(analyst_raw or "", "ANALYST")
+
+    # Score szamitas
+    hodor_score   = _velemeny_to_score(hodor_v,   hodor_s,   "HODOR")
+    flipper_score = _velemeny_to_score(flipper_v, flipper_s, "FLIPPER")
+    analyst_score = _velemeny_to_score(analyst_v, analyst_s, "ANALYST")
+
+    # Vegso score: Analyst 40%, Hodor 30%, Flipper 30%
+    final_score = int(
+        analyst_score * 0.40 +
+        hodor_score   * 0.30 +
+        flipper_score * 0.30
+    )
+    label = _score_to_label(final_score)
+
+    # Konszenzus szamlalasa
+    votes        = [hodor_v, flipper_v, analyst_v]
+    vetel_count  = votes.count("VETEL")
+    elad_count   = votes.count("ELAD")
+    varj_count   = votes.count("VARJ")
+
+    # Emojik a velemenyekhez
+    def v_emoji(v):
+        return "✅" if v == "VETEL" else ("❌" if v == "ELAD" else "⏸️")
+
+    response = (
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎯 **VEGSO SCORE: {final_score}/100** — {label}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+        f"📊 **KONSZENZUS:** "
+        f"{'✅ ' * vetel_count}{'⏸️ ' * varj_count}{'❌ ' * elad_count}"
+        f"({vetel_count} Vetel / {varj_count} Varj / {elad_count} Elad)\n\n"
+
+        f"🐂 **HODOR** *(hosszutavu, ovatos)* — {v_emoji(hodor_v)} {hodor_v} | Bizalom: {hodor_s}/10\n"
+        f"> {hodor_i}\n\n"
+
+        f"⚡ **FLIPPER** *(gyors, agressziv)* — {v_emoji(flipper_v)} {flipper_v} | Bizalom: {flipper_s}/10\n"
+        f"> {flipper_i}\n\n"
+
+        f"📈 **ANALYST** *(technikai)* — {v_emoji(analyst_v)} {analyst_v} | Score: {analyst_s}/100\n"
+        f"> {analyst_i}\n\n"
+
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚠️ *Ez nem penzugyi tanacsadas. A piac kiszamithatatlan!*"
+    )
+
+    # Cache-be mentjuk
+    set_cached_ai_response(cache_key, response)
+    return response
 
 async def get_ai_general():
-    """Teljes piaci elemzés az összes gyűjtött adatból."""
-    case_summaries, skin_candidates = build_market_snapshot()
+    """Teljes piaci elemzes az osszes gyujtott adatbol. 1 Gemini hivas."""
+    # Cache ellenorzese
+    cache_key      = "general_market"
+    cached, cached_ts = get_cached_ai_response(cache_key)
+    if cached:
+        age_min = int((time.time() - cached_ts) / 60)
+        return cached + f"\n\n*(Cache-elt valasz, {age_min} perce)*"
 
+    can_go, limit_msg = _check_gemini_rate_limit()
+    if not can_go:
+        return f"⏳ **Rate limit:**\n{limit_msg}"
+
+    case_summaries, skin_candidates = build_market_snapshot()
     total_items = len(case_summaries) + len(skin_candidates)
     if total_items == 0:
         return (
-            "Még nincs elég adat az általános elemzéshez.\n"
-            f"A bot minimum {MIN_HISTORY_POINTS} mérést igényel minden egyes tételnél.\n"
-            f"Próbáld meg ~30 perc múlva, amikor több adat gyűlt össze!"
+            "Meg nincs eleg adat az altalanos elemzeshez.\n"
+            f"A bot minimum {MIN_HISTORY_POINTS} merest igenyel minden egyes tetnelnel.\n"
+            f"Probald meg ~30 perc mulva, amikor tobb adat gyult ossze!"
         )
 
     prompt = format_general_prompt(case_summaries, skin_candidates)
     loop   = asyncio.get_running_loop()
-    # General elemzéshez több token kell
+    _increment_gemini_counter()
     answer = await loop.run_in_executor(executor, _call_gemini_sync, prompt, 1500)
 
-    return answer if answer else "Az AI elemzés jelenleg nem elérhető. Próbáld meg később!"
+    if answer:
+        set_cached_ai_response(cache_key, answer)
+    return answer if answer else "Az AI elemzes jelenleg nem erheto el. Probald meg kesobb!"
 
 # -------------------------
 # SLASH COMMAND: /tip
 # -------------------------
 
-@tree.command(name="tip", description="AI elemzés: /tip [skin neve] VAGY /tip general - teljes piaci áttekintés")
-@discord.app_commands.describe(nev="Skin neve (pl: AK-47 | Redline (Field-Tested)) VAGY 'general' az általános elemzéshez")
+@tree.command(
+    name="tip",
+    description="AI elemzes: /tip [skin neve] | /tip general | /tip status"
+)
+@discord.app_commands.describe(
+    nev="Skin neve (pl: AK-47 | Redline (Field-Tested)) VAGY 'general' VAGY 'status'"
+)
 async def tip_command(interaction: discord.Interaction, nev: str):
     await interaction.response.defer()
 
     if not GEMINI_KEY:
         await interaction.followup.send(
             "Az AI funkció nincs konfigurálva.\n"
-            "Be kell állítani a `GEMINI_API_KEY` környezeti változót Render.com-on!\n"
+            "Be kell állítani a `GEMINI_API_KEY` környezeti változót!\n"
             "API kulcs: https://aistudio.google.com"
         )
+        return
+
+    nev_clean = nev.strip().lower()
+
+    # ----------------------------------
+    # /tip status - API statisztika
+    # ----------------------------------
+    if nev_clean == "status":
+        await interaction.followup.send(get_gemini_status())
         return
 
     # ----------------------------------
     # /tip general - teljes piaci elemzés
     # ----------------------------------
-    if nev.strip().lower() == "general":
+    if nev_clean == "general":
         await interaction.followup.send(
-            "Teljes piaci elemzés folyamatban...\n"
+            "🔍 **Teljes piaci elemzés folyamatban...**\n"
             "Az AI most átnézi az összes gyűjtött ládát és skint.\n"
             "Ez 10-20 másodpercet vehet igénybe..."
         )
-
-        result = await get_ai_general()
-
-        header   = f"**ÁLTALÁNOS PIACI ELEMZÉS**\n{'─'*40}\n"
+        result   = await get_ai_general()
+        header   = f"**🌍 ÁLTALÁNOS PIACI ELEMZÉS**\n{'━'*30}\n"
         full_msg = header + result
 
-        # Discord 2000 karakter limit kezelése - több üzenetbe darabolás
-        if len(full_msg) <= 2000:
-            await interaction.channel.send(full_msg)
-        else:
-            # Első rész header-rel
-            await interaction.channel.send(header + result[:1800] + "...")
-            # Maradék darabolva
-            remaining = result[1800:]
-            while remaining:
-                chunk    = remaining[:1950]
-                remaining = remaining[1950:]
-                await interaction.channel.send(chunk)
+        await _send_long_message(interaction.channel, full_msg)
         return
 
     # ----------------------------------
-    # /tip [skin neve] - egyedi elemzés
+    # /tip [skin neve] - egyedi 3-trader elemzés
     # ----------------------------------
-    # Kondíciót levágjuk a kereséshez (pl "AK-47 | Redline (Field-Tested)" -> "AK-47 | Redline")
     COND_LIST = [" (Factory New)", " (Minimal Wear)", " (Field-Tested)", " (Well-Worn)", " (Battle-Scarred)"]
-    base_nev = nev
+    base_nev  = nev.strip()
     for c in COND_LIST:
-        if nev.endswith(c):
-            base_nev = nev[:-len(c)]
+        if base_nev.endswith(c):
+            base_nev = base_nev[:-len(c)]
             break
 
     found = base_nev in SKIN_TO_CASE
@@ -521,38 +921,26 @@ async def tip_command(interaction: discord.Interaction, nev: str):
                 found    = True
                 break
 
-    # Ha kondícióval adta meg, visszarakjuk
-    if found and base_nev != nev:
-        nev = nev  # megtartjuk az eredetit kondícióval
-    elif found:
-        nev = base_nev
-
     if not found:
         await interaction.followup.send(
-            f"Nem találtam ezt a skint: `{nev}`\n"
-            f"Ellenőrizd a nevet, vagy írd: `/tip general` az általános elemzéshez!"
+            f"❌ Nem találtam ezt a skint: `{nev}`\n"
+            f"Ellenőrizd a nevet, vagy írd: `/tip general` az általános elemzéshez!\n"
+            f"Tipp: a skin nevét pontosan add meg, pl: `AK-47 | Redline`"
         )
         return
 
-    CONDITIONS = [
-        "",
-        " (Factory New)",
-        " (Minimal Wear)",
-        " (Field-Tested)",
-        " (Well-Worn)",
-        " (Battle-Scarred)",
-    ]
-
+    # Ar lekeres kondicioval
+    CONDITIONS = ["", " (Factory New)", " (Minimal Wear)", " (Field-Tested)", " (Well-Worn)", " (Battle-Scarred)"]
     price     = None
-    used_name = nev
+    used_name = nev.strip()
 
-    if any(cond.strip() in nev for cond in CONDITIONS[1:]):
-        price     = await get_price(nev)
-        used_name = nev
+    if any(cond.strip() in nev for cond in COND_LIST):
+        price     = await get_price(nev.strip())
+        used_name = nev.strip()
     else:
         for cond in CONDITIONS:
-            test_name = nev + cond
-            p = await get_price(test_name)
+            test_name = base_nev + cond
+            p         = await get_price(test_name)
             if p is not None:
                 price     = p
                 used_name = test_name
@@ -560,26 +948,31 @@ async def tip_command(interaction: discord.Interaction, nev: str):
 
     if price is None:
         await interaction.followup.send(
-            f"Nem sikerült az árat lekérni: `{nev}`\n"
-            f"Próbáld meg a pontos Steam névvel + kondícióval!"
+            f"❌ Nem sikerült az árat lekérni: `{nev}`\n"
+            f"Próbáld meg a pontos Steam névvel + kondícióval!\n"
+            f"Pl: `AK-47 | Inheritance (Field-Tested)`"
         )
         return
 
-    await interaction.followup.send(
-        f"Elemzés folyamatban...\n"
-        f"Skin: `{used_name}` | Jelenlegi ár: `{price:.2f} EUR`\n"
-        f"Az AI feldolgozza a gyűjtött piaci adatokat..."
-    )
-
-    tip      = await get_ai_tip(used_name, price)
-    header   = f"**AI ELEMZÉS: {used_name}**\n{'─'*40}\n"
-    full_msg = header + tip
-
-    if len(full_msg) <= 2000:
-        await interaction.channel.send(full_msg)
+    # Cache ellenorzese es elore jelzese
+    cache_key      = f"tip_{used_name}"
+    cached, cached_ts = get_cached_ai_response(cache_key)
+    if cached:
+        age_min = int((time.time() - cached_ts) / 60)
+        await interaction.followup.send(
+            f"💾 **Cache-ből töltöm** ({age_min} perce mentett elemzés)..."
+        )
     else:
-        await interaction.channel.send(header + tip[:1800] + "...")
-        await interaction.channel.send("..." + tip[1800:])
+        await interaction.followup.send(
+            f"🤖 **3 Trader AI elemzés indul...**\n"
+            f"Skin: `{used_name}` | Ár: `{price:.2f} EUR`\n"
+            f"HODOR → FLIPPER → ANALYST ... (~15-30 mp)"
+        )
+
+    tip    = await get_ai_tip_full(used_name, price)
+    header = f"**🎮 AI ELEMZÉS: {used_name}**\n**💰 Jelenlegi ár: {price:.2f} EUR**\n{'━'*30}\n"
+
+    await _send_long_message(interaction.channel, header + tip)
 
 # -------------------------
 # SLASH COMMAND: /skin
@@ -590,40 +983,33 @@ async def tip_command(interaction: discord.Interaction, nev: str):
 async def skin_command(interaction: discord.Interaction, nev: str):
     await interaction.response.defer()
 
-    found = nev in SKIN_TO_CASE
+    found    = nev in SKIN_TO_CASE
+    nev_work = nev.strip()
     if not found:
         for s in SKIN_TO_CASE.keys():
-            if s.lower() == nev.lower():
-                nev   = s
-                found = True
+            if s.lower() == nev_work.lower():
+                nev_work = s
+                found    = True
                 break
 
     if not found:
         await interaction.followup.send(
-            f"Nem találtam ezt a skint a cases.json-ban: `{nev}`\n"
-            f"Ellenőrizd a nevet! (pl: `AK-47 | Inheritance`)",
+            f"❌ Nem találtam ezt a skint a cases.json-ban: `{nev}`\n"
+            f"Ellenőrizd a nevet! (pl: `AK-47 | Inheritance`)"
         )
         return
 
-    CONDITIONS = [
-        "",
-        " (Factory New)",
-        " (Minimal Wear)",
-        " (Field-Tested)",
-        " (Well-Worn)",
-        " (Battle-Scarred)",
-    ]
+    CONDITIONS = ["", " (Factory New)", " (Minimal Wear)", " (Field-Tested)", " (Well-Worn)", " (Battle-Scarred)"]
+    price      = None
+    used_name  = nev_work
 
-    price     = None
-    used_name = nev
-
-    if any(cond.strip() in nev for cond in CONDITIONS[1:]):
-        price     = await get_price(nev)
-        used_name = nev
+    if any(cond.strip() in nev_work for cond in CONDITIONS[1:]):
+        price     = await get_price(nev_work)
+        used_name = nev_work
     else:
         for cond in CONDITIONS:
-            test_name = nev + cond
-            p = await get_price(test_name)
+            test_name = nev_work + cond
+            p         = await get_price(test_name)
             if p is not None:
                 price     = p
                 used_name = test_name
@@ -631,13 +1017,13 @@ async def skin_command(interaction: discord.Interaction, nev: str):
 
     if price is None:
         await interaction.followup.send(
-            f"Nem sikerült az árat lekérni: `{nev}`\n"
+            f"❌ Nem sikerült az árat lekérni: `{nev}`\n"
             f"Próbáld meg a pontos Steam névvel kondícióval, pl:\n"
             f"`AK-47 | Inheritance (Field-Tested)`"
         )
         return
 
-    manual_tracking[nev] = {
+    manual_tracking[nev_work] = {
         "start_price": price,
         "start_time":  time.time(),
         "channel_id":  interaction.channel_id,
@@ -646,11 +1032,39 @@ async def skin_command(interaction: discord.Interaction, nev: str):
     }
 
     await interaction.followup.send(
-        f"Követés elindult!\n"
+        f"✅ **Követés elindult!**\n"
         f"Skin: `{used_name}`\n"
-        f"Jelenlegi ár: {price} EUR\n"
-        f"8 nap múlva küldök visszajelzést a változásról."
+        f"Jelenlegi ár: **{price:.2f} EUR**\n"
+        f"📅 8 nap múlva küldök visszajelzést a változásról."
     )
+
+# -------------------------
+# HOSSZU UZENET KULDES SEGITFUGGVENY
+# -------------------------
+
+async def _send_long_message(channel, text):
+    """Discord 2000 karakteres limit intelligens kezelese."""
+    if len(text) <= 1990:
+        await channel.send(text)
+        return
+
+    # Feldarabolas soronkent (nem vagunk el szo kozott)
+    chunks  = []
+    current = ""
+    for line in text.split("\n"):
+        test = current + line + "\n"
+        if len(test) > 1980:
+            if current:
+                chunks.append(current.rstrip())
+            current = line + "\n"
+        else:
+            current = test
+    if current.strip():
+        chunks.append(current.rstrip())
+
+    for chunk in chunks:
+        await channel.send(chunk)
+        await asyncio.sleep(0.5)  # kis delay hogy ne flood-olja a Discord API-t
 
 # -------------------------
 # MANUALIS KOVETES
@@ -675,7 +1089,7 @@ async def check_manual_tracking(channel):
 
             change = (current_price - initial) / initial
             sign   = "+" if change >= 0 else ""
-            irany  = "emelkedett" if change >= 0 else "csökkent"
+            irany  = "📈 emelkedett" if change >= 0 else "📉 csökkent"
 
             try:
                 target_channel = await client.fetch_channel(data["channel_id"])
@@ -683,10 +1097,10 @@ async def check_manual_tracking(channel):
                 target_channel = channel
 
             await target_channel.send(
-                f"8 NAPOS VISSZAJELZÉS\n"
+                f"📅 **8 NAPOS VISSZAJELZÉS**\n"
                 f"Skin: `{query_name}`\n"
-                f"Indulási ár: {round(initial, 2)} EUR\n"
-                f"Jelenlegi ár: {round(current_price, 2)} EUR\n"
+                f"Indulási ár: **{round(initial, 2)} EUR**\n"
+                f"Jelenlegi ár: **{round(current_price, 2)} EUR**\n"
                 f"Az ár {sign}{round(change * 100, 2)}% {irany} a követési időszak alatt."
             )
             manual_tracking[skin]["reported_8d"] = True
@@ -701,11 +1115,11 @@ async def check_manual_tracking(channel):
 
 def get_signal_label(skin_change):
     if skin_change <= SIGNAL_STRONG_MAX:
-        return "VEDD MEG"
+        return "🟢 VEDD MEG"
     elif skin_change <= SIGNAL_MEDIUM_MAX:
-        return "JO VETEL LEHET"
+        return "🟡 JO VETEL LEHET"
     elif skin_change <= SIGNAL_WEAK_MAX:
-        return "FIGYELD"
+        return "🟠 FIGYELD"
     else:
         return None
 
@@ -713,22 +1127,21 @@ async def main_loop():
     global last_heartbeat
 
     channel = await client.fetch_channel(CHANNEL_ID)
-    await channel.send("Online! Elemzem a ládákat...")
+    await channel.send("✅ **Bot online!** Elemzem a ládákat...")
 
-    # Ládák árai - darabolva ha kell
-    msg = "**Ládák aktuális árai:**\n"
+    # Ládák árai
+    msg = "**📦 Ládák aktuális árai:**\n"
     for case in ALL_CASES:
         price = await get_price(case)
-        line  = f"{case}: {price:.2f} EUR\n" if price else f"{case}: nem elérhető\n"
+        line  = f"• {case}: **{price:.2f} EUR**\n" if price else f"• {case}: nem elérhető\n"
         if len(msg) + len(line) > 1900:
             await channel.send(msg)
             msg = ""
         msg += line
-    if msg:
+    if msg.strip():
         await channel.send(msg)
 
-    # Random 5 skin - kondícióval keres
-    import random
+    # 5 random skin
     CONDS     = [" (Factory New)", " (Minimal Wear)", " (Field-Tested)", " (Well-Worn)", " (Battle-Scarred)"]
     all_skins = list(SKIN_TO_CASE.keys())
     jeloltek  = random.sample(all_skins, min(20, len(all_skins)))
@@ -739,12 +1152,11 @@ async def main_loop():
         for cond in CONDS:
             p = await get_price(skin + cond)
             if p is not None:
-                skin_lines.append(f"{skin}{cond}: {p:.2f} EUR")
+                skin_lines.append(f"• {skin}{cond}: **{p:.2f} EUR**")
                 break
     if skin_lines:
-        await channel.send("**5 random skin ára:**\n" + "\n".join(skin_lines))
+        await channel.send("**🎮 5 random skin ára:**\n" + "\n".join(skin_lines))
 
-    # Heartbeat beállítása hogy ne szóljon azonnal
     last_heartbeat = time.time()
 
     while True:
@@ -752,7 +1164,7 @@ async def main_loop():
             current_time = time.time()
 
             if current_time - last_heartbeat > 3600:
-                await channel.send("Bot online es figyel!")
+                await channel.send("💓 Bot online és figyel!")
                 last_heartbeat = current_time
 
             await check_manual_tracking(channel)
@@ -778,18 +1190,20 @@ async def main_loop():
 
                     sign = "+" if skin_change >= 0 else ""
                     await channel.send(
-                        f"A \"{case}\"-ban a \"{skin}\" - {label}\n"
-                        f"Lada emelkedes: +{round(case_change * 100, 2)}%\n"
-                        f"Skin jelenlegi ar: {skin_price} EUR "
-                        f"({sign}{round(skin_change * 100, 2)}%)"
+                        f"📣 **JELZÉS: {label}**\n"
+                        f"Láda: `{case}` (+{round(case_change * 100, 2)}%)\n"
+                        f"Skin: `{skin}`\n"
+                        f"Jelenlegi ár: **{skin_price} EUR** "
+                        f"({sign}{round(skin_change * 100, 2)}%)\n"
+                        f"💡 Tipp: `/tip {skin}` az AI elemzésért!"
                     )
 
             await asyncio.sleep(CHECK_INTERVAL)
 
         except Exception as e:
-            print(f"HIBA: {e}")
+            print(f"HIBA a fo ciklusban: {e}")
             try:
-                await channel.send(f"Hiba: `{e}`")
+                await channel.send(f"⚠️ Hiba: `{e}`")
             except Exception:
                 pass
             await asyncio.sleep(60)
