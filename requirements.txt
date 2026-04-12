@@ -2,4 +2,4 @@ discord.py
 requests
 numpy
 certifi
-pymongo
+pymongo[srv]==4.7.2
