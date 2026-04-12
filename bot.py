@@ -470,11 +470,11 @@ SYSTEM_PROMPT = (
 def _call_gemini_sync(prompt, max_tokens=1200):
     """
     Alacsony szintu Gemini hivas.
-    Visszater a szoveges valasszal, vagy None-nal hiba eseten.
+    Visszater a szoveges valasszal, vagy egy HIBA:... prefixu hibauzenettel.
     Nem kezeli a rate limiteket - azt a hivo felnek kell.
     """
     if not GEMINI_KEY:
-        return None
+        return "HIBA: GEMINI_API_KEY nincs beallitva a kornyezeti valtozokban!"
 
     try:
         url  = f"{GEMINI_URL}?key={GEMINI_KEY}"
@@ -501,8 +501,11 @@ def _call_gemini_sync(prompt, max_tokens=1200):
                 data       = res.json()
                 candidates = data.get("candidates", [])
                 if not candidates:
-                    print(f"[GEMINI] Ures candidates. Valasz: {data}")
-                    return "Az AI nem tudott valaszt generalni. Probald ujra!"
+                    # Lehet hogy a tartalom blokkolt (safety filter)
+                    block_reason = data.get("promptFeedback", {}).get("blockReason", "ismeretlen")
+                    msg = f"HIBA: Gemini nem generalt valaszt. Ok: {block_reason}. Teljes valasz: {str(data)[:200]}"
+                    print(f"[GEMINI] {msg}")
+                    return msg
                 return candidates[0]["content"]["parts"][0]["text"]
 
             elif res.status_code == 429:
@@ -518,14 +521,21 @@ def _call_gemini_sync(prompt, max_tokens=1200):
                 continue
 
             else:
-                print(f"[GEMINI] API hiba {res.status_code}: {res.text[:300]}")
-                return None
+                err_text = res.text[:400]
+                msg = f"HIBA: Gemini API {res.status_code} hibat adott. Valasz: {err_text}"
+                print(f"[GEMINI] {msg}")
+                return msg
 
-        return None
+        return "HIBA: Gemini 3 probalkozas utan sem valaszolt (429/503 loop)."
 
+    except requests.exceptions.Timeout:
+        msg = "HIBA: Gemini API timeout (45s). Lehet hogy a prompt tul hosszu vagy a szerver terhelt."
+        print(f"[GEMINI] {msg}")
+        return msg
     except Exception as e:
-        print(f"[GEMINI] Hivas hiba: {e}")
-        return None
+        msg = f"HIBA: Gemini hivas kivetel: {type(e).__name__}: {e}"
+        print(f"[GEMINI] {msg}")
+        return msg
 
 # =====================================================================
 # 3 TRADER SZEMÉLYISÉG + SCORE RENDSZER
@@ -771,6 +781,11 @@ async def get_ai_tip_full(skin_name, current_price):
         executor, _call_gemini_trader, data_block, ANALYST_PROMPT, "ANALYST", 300
     )
 
+    # Ha barmelyik HIBA: prefixszel tert vissza, megmutatjuk
+    for trader_name, raw in [("HODOR", hodor_raw), ("FLIPPER", flipper_raw), ("ANALYST", analyst_raw)]:
+        if raw and raw.startswith("HIBA:"):
+            return f"❌ **Gemini API hiba ({trader_name} keres):**\n```\n{raw}\n```"
+
     # Parseolas
     hodor_v,   hodor_i,   hodor_s   = _parse_trader_response(hodor_raw or "",   "HODOR")
     flipper_v, flipper_i, flipper_s = _parse_trader_response(flipper_raw or "", "FLIPPER")
@@ -840,21 +855,50 @@ async def get_ai_general():
 
     case_summaries, skin_candidates = build_market_snapshot()
     total_items = len(case_summaries) + len(skin_candidates)
+
+    # Ha nincs eleg history-adat, de van price_cache-unk, abbol epitunk egy alap promptot
     if total_items == 0:
-        return (
-            "Meg nincs eleg adat az altalanos elemzeshez.\n"
-            f"A bot minimum {MIN_HISTORY_POINTS} merest igenyel minden egyes tetnelnel.\n"
-            f"Probald meg ~30 perc mulva, amikor tobb adat gyult ossze!"
+        if not price_cache:
+            return (
+                "⏳ Még nincs egyetlen ár sem a cache-ben.\n"
+                f"Kérlek várj ~2-3 percet az indítás után, amíg a bot lekéri az árakat!"
+            )
+        # Alap prompt csak a jelenlegi cachelt arakbol
+        cache_lines = []
+        for name, price in list(price_cache.items())[:30]:
+            cache_lines.append(f"  {name}: {price:.2f} EUR")
+        fallback_prompt = (
+            "Az alabbiakban egy CS2 trading bot altal gyujtott JELENLEGI PIACI ARAK lathatoak.\n"
+            "Meg nincs eleg tortenet-adat a trend elemzeshez, csak az aktualis arak.\n\n"
+            "JELENLEGI ARAK:\n" + "\n".join(cache_lines) + "\n\n"
+            "FELADATOD:\n"
+            "1. Rövid altalanos megjegyzes a CS2 piac jelenlegi arszintjeirol.\n"
+            "2. Melyik 2-3 item tunik erdekes arszinten lenni?\n"
+            "3. Mire figyeljen a trader a kovetkezo napokban?\n"
+            "Megjegyzes: ez egy korai elemzes, meg nincs trend-adat. Max 200 szo."
         )
+        loop   = asyncio.get_running_loop()
+        _increment_gemini_counter()
+        answer = await loop.run_in_executor(executor, _call_gemini_sync, fallback_prompt, 800)
+        if not answer:
+            return "❌ Az AI nem adott vissza választ. Ellenőrizd a Render.com logokat!"
+        if answer.startswith("HIBA:"):
+            return f"❌ **Gemini API hiba:**\n```\n{answer}\n```"
+        return "⚠️ *Korai elemzés - trend adatok nélkül*\n\n" + answer
 
     prompt = format_general_prompt(case_summaries, skin_candidates)
     loop   = asyncio.get_running_loop()
     _increment_gemini_counter()
     answer = await loop.run_in_executor(executor, _call_gemini_sync, prompt, 1500)
 
-    if answer:
-        set_cached_ai_response(cache_key, answer)
-    return answer if answer else "Az AI elemzes jelenleg nem erheto el. Probald meg kesobb!"
+    # Ha a valasz HIBA: prefixszel kezdodik, megmutatjuk a felhasznalonak
+    if not answer:
+        return "❌ Az AI nem adott vissza választ. Ellenőrizd a Render.com logokat!"
+    if answer.startswith("HIBA:"):
+        return f"❌ **Gemini API hiba:**\n```\n{answer}\n```"
+
+    set_cached_ai_response(cache_key, answer)
+    return answer
 
 # -------------------------
 # SLASH COMMAND: /tip
