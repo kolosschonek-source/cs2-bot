@@ -365,43 +365,32 @@ def _call_gemini_sync(prompt, max_tokens=1000):
             }
         }
 
-        wait_times = [20, 40, 70]
         for attempt in range(3):
-            try:
-                res = requests.post(url, json=body, timeout=50)
-            except requests.exceptions.Timeout:
-                return "⏳ Gemini timeout. Probald ujra!"
-            except requests.exceptions.ConnectionError:
-                return "❌ Gemini kapcsolat hiba."
+            res = requests.post(url, json=body, timeout=40)
 
             if res.status_code == 200:
                 data = res.json()
                 candidates = data.get("candidates", [])
                 if not candidates:
-                    reason = data.get("promptFeedback", {}).get("blockReason", "ismeretlen")
-                    print(f"[GEMINI] Ures candidates, ok: {reason}. Teljes valasz: {data}")
-                    return f"⚠️ Gemini nem generalt valaszt (ok: {reason}). Probald kesobb!"
+                    print(f"Gemini: ures candidates. Valasz: {data}")
+                    return "Az AI nem tudott valaszt generalni. Probald ujra!"
                 return candidates[0]["content"]["parts"][0]["text"]
 
-            elif res.status_code in (429, 503):
-                wait = wait_times[attempt]
-                print(f"[GEMINI] {res.status_code} - varakozas {wait}s (proba {attempt+1}/3)")
+            elif res.status_code == 429:
+                wait = 15 * (attempt + 1)
+                print(f"GEMINI RATE LIMIT! Varakozas {wait}s... (proba {attempt+1}/3)")
                 time.sleep(wait)
                 continue
 
-            elif res.status_code == 400:
-                print(f"[GEMINI] 400 bad request: {res.text[:300]}")
-                return "❌ Gemini 400 hiba (tul hosszu prompt). Probald /tip general helyett egy skinnel!"
-
             else:
-                print(f"[GEMINI] {res.status_code}: {res.text[:200]}")
-                return f"❌ Gemini {res.status_code} hiba. Probald kesobb!"
+                print(f"Gemini API hiba {res.status_code}: {res.text[:300]}")
+                return None
 
-        return "⏳ Gemini tulterhelt (429/503). Varj 2-3 percet es probald ujra!"
+        return "Az AI percenkenti limit elerte (15 keres/perc). Varj ~1 percet es probald ujra!"
 
     except Exception as e:
-        print(f"[GEMINI] Kivatel: {type(e).__name__}: {e}")
-        return f"❌ Hiba: {type(e).__name__}: {str(e)[:100]}"
+        print(f"Gemini hivas hiba: {e}")
+        return None
 
 async def get_ai_tip(skin_name, current_price):
     hist_result = format_history_for_ai(skin_name)
@@ -449,37 +438,23 @@ async def get_ai_tip(skin_name, current_price):
     return answer if answer else "Az AI elemzés jelenleg nem elérhető. Próbáld meg később!"
 
 async def get_ai_general():
-    """Teljes piaci elemzes az osszes gyujtott adatbol."""
+    """Teljes piaci elemzés az összes gyűjtött adatból."""
     case_summaries, skin_candidates = build_market_snapshot()
-    loop = asyncio.get_running_loop()
 
     total_items = len(case_summaries) + len(skin_candidates)
     if total_items == 0:
-        # Nincs eleg history, de ha van price_cache, azt hasznaljuk
-        if price_cache:
-            case_prices = {k: v for k, v in price_cache.items() if k in ALL_CASES}
-            if case_prices:
-                plines = [f"  {n}: {p:.2f} EUR" for n, p in sorted(case_prices.items(), key=lambda x: x[1], reverse=True)]
-                prompt = (
-                    "CS2 ladak jelenlegi arak (trend adat meg nincs, ez az elso meres):\n"
-                    + "\n".join(plines)
-                    + "\n\nAdj rovid altalanos megjegyzest ezekrol az arszintekrol. Max 150 szo."
-                )
-                answer = await loop.run_in_executor(executor, _call_gemini_sync, prompt, 600)
-                if answer and not answer.startswith("❌") and not answer.startswith("⏳"):
-                    return "⚠️ *Korai elemzes - meg nincs trend adat*\n\n" + answer
         return (
-            "⏳ Meg nincs eleg adat az altalanos elemzeshez.\n"
-            f"Minimum {MIN_HISTORY_POINTS} meres kell tetelenként.\n"
-            "Probald ~30 perc mulva!"
+            "Még nincs elég adat az általános elemzéshez.\n"
+            f"A bot minimum {MIN_HISTORY_POINTS} mérést igényel minden egyes tételnél.\n"
+            f"Próbáld meg ~30 perc múlva, amikor több adat gyűlt össze!"
         )
 
     prompt = format_general_prompt(case_summaries, skin_candidates)
+    loop   = asyncio.get_running_loop()
+    # General elemzéshez több token kell
     answer = await loop.run_in_executor(executor, _call_gemini_sync, prompt, 1500)
 
-    if not answer:
-        return "❌ Az AI nem adott vissza valaszt. Probald ujra!"
-    return answer
+    return answer if answer else "Az AI elemzés jelenleg nem elérhető. Próbáld meg később!"
 
 # -------------------------
 # SLASH COMMAND: /tip
@@ -835,5 +810,14 @@ async def on_ready():
     if not loop_started:
         loop_started = True
         asyncio.ensure_future(main_loop())
+        asyncio.ensure_future(
+            news_monitor_loop(
+                channel      = await client.fetch_channel(CHANNEL_ID),
+                gemini_key   = GEMINI_KEY,
+                all_cases    = ALL_CASES,
+                skin_to_case = SKIN_TO_CASE,
+                executor     = executor,
+            )
+        )
 
 client.run(TOKEN)
