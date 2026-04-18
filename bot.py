@@ -55,6 +55,7 @@ for case_name, skins in CASE_SKINS.items():
 
 TOKEN        = os.getenv("DISCORD_TOKEN")
 GEMINI_KEY   = os.getenv("GEMINI_API_KEY")
+MONGO_URI    = os.getenv("MONGO_URI")   # mongodb+srv://user:pass@cluster.mongodb.net/
 CHANNEL_ID   = 1487500804532207699
 
 CHECK_INTERVAL      = 600
@@ -75,6 +76,139 @@ STEAM_CURRENCY = 3
 
 MAX_HISTORY_POINTS = 50
 MIN_HISTORY_POINTS = 3
+
+# =====================================================================
+# MONGODB RETEG
+# =====================================================================
+mongo_client = None
+mongo_db     = None
+mongo_ok     = False
+
+def init_mongodb():
+    global mongo_client, mongo_db, mongo_ok
+    if not MONGO_URI:
+        print("[MONGO] MONGO_URI nincs beallitva - in-memory mod.")
+        return
+    try:
+        from pymongo import MongoClient, ASCENDING
+        mongo_client = MongoClient(
+            MONGO_URI,
+            serverSelectionTimeoutMS=5000,
+            connectTimeoutMS=5000,
+            socketTimeoutMS=10000,
+        )
+        mongo_client.admin.command("ping")
+        mongo_db = mongo_client["cs2bot"]
+        ph = mongo_db["price_history"]
+        ph.create_index([("name", ASCENDING), ("ts", ASCENDING)], background=True)
+        mongo_db["manual_tracking"].create_index(
+            [("skin", ASCENDING)], unique=True, background=True
+        )
+        mongo_ok = True
+        print("[MONGO] Kapcsolat OK - cs2bot adatbazis")
+    except Exception as e:
+        print(f"[MONGO] Kapcsolat SIKERTELEN: {e}")
+        print("[MONGO] In-memory modban futunk.")
+        mongo_ok = False
+
+def mongo_insert_price(name, price, ts):
+    if not mongo_ok:
+        return
+    try:
+        cutoff = ts - 600
+        if mongo_db["price_history"].find_one({"name": name, "ts": {"$gte": cutoff}}, {"_id": 1}):
+            return
+        from datetime import datetime, timezone
+        mongo_db["price_history"].insert_one({
+            "name": name, "ts": ts, "price": price,
+            "date": datetime.fromtimestamp(ts, tz=timezone.utc)
+        })
+    except Exception as e:
+        print(f"[MONGO] insert_price hiba ({name}): {e}")
+
+def mongo_load_history(name, days=7):
+    if not mongo_ok:
+        return []
+    try:
+        cutoff = time.time() - days * 86400
+        from pymongo import ASCENDING
+        return list(mongo_db["price_history"].find(
+            {"name": name, "ts": {"$gte": cutoff}},
+            {"_id": 0, "ts": 1, "price": 1}
+        ).sort("ts", ASCENDING))
+    except Exception as e:
+        print(f"[MONGO] load_history hiba ({name}): {e}")
+        return []
+
+def mongo_load_history_into_memory():
+    if not mongo_ok:
+        return 0
+    total = 0
+    try:
+        all_names = list(SKIN_TO_CASE.keys()) + ALL_CASES
+        for name in all_names:
+            rows = mongo_load_history(name, days=7)
+            if rows:
+                price_history[name] = rows
+                total += len(rows)
+        print(f"[MONGO] {total} ar-pont betoltve.")
+    except Exception as e:
+        print(f"[MONGO] load_into_memory hiba: {e}")
+    return total
+
+def mongo_save_tracking(skin, data):
+    if not mongo_ok:
+        return
+    try:
+        mongo_db["manual_tracking"].update_one(
+            {"skin": skin}, {"$set": {**data, "skin": skin}}, upsert=True
+        )
+    except Exception as e:
+        print(f"[MONGO] save_tracking hiba ({skin}): {e}")
+
+def mongo_delete_tracking(skin):
+    if not mongo_ok:
+        return
+    try:
+        mongo_db["manual_tracking"].delete_one({"skin": skin})
+    except Exception as e:
+        print(f"[MONGO] delete_tracking hiba ({skin}): {e}")
+
+def mongo_load_all_tracking():
+    if not mongo_ok:
+        return {}
+    try:
+        result = {}
+        for doc in mongo_db["manual_tracking"].find({}, {"_id": 0}):
+            skin = doc.pop("skin")
+            result[skin] = doc
+        return result
+    except Exception as e:
+        print(f"[MONGO] load_all_tracking hiba: {e}")
+        return {}
+
+def mongo_get_stats():
+    if not mongo_ok:
+        return None
+    try:
+        from pymongo import ASCENDING, DESCENDING
+        ph_count     = mongo_db["price_history"].count_documents({})
+        mt_count     = mongo_db["manual_tracking"].count_documents({})
+        oldest       = mongo_db["price_history"].find_one({}, {"ts": 1, "_id": 0}, sort=[("ts", ASCENDING)])
+        newest       = mongo_db["price_history"].find_one({}, {"ts": 1, "_id": 0}, sort=[("ts", DESCENDING)])
+        unique_items = len(mongo_db["price_history"].distinct("name"))
+        return {
+            "total_points":  ph_count,
+            "unique_items":  unique_items,
+            "tracked_skins": mt_count,
+            "oldest_ts":     oldest["ts"] if oldest else None,
+            "newest_ts":     newest["ts"] if newest else None,
+        }
+    except Exception as e:
+        print(f"[MONGO] get_stats hiba: {e}")
+        return None
+
+# =====================================================================
 
 executor = ThreadPoolExecutor(max_workers=2)
 
@@ -100,9 +234,12 @@ price_history   = defaultdict(list)
 # -------------------------
 
 def record_price(name, price):
-    price_history[name].append({"ts": time.time(), "price": price})
+    ts = time.time()
+    price_history[name].append({"ts": ts, "price": price})
     if len(price_history[name]) > MAX_HISTORY_POINTS * 2:
         price_history[name] = price_history[name][-MAX_HISTORY_POINTS:]
+    # MongoDB-be is menti hatter-szalon (nem lassitja a fo ciklust)
+    threading.Thread(target=mongo_insert_price, args=(name, price, ts), daemon=True).start()
 
 def get_dynamic_history(name):
     history = price_history.get(name, [])
@@ -365,32 +502,44 @@ def _call_gemini_sync(prompt, max_tokens=1000):
             }
         }
 
+        # Exponential backoff: 20s, 40s, 70s
+        wait_times = [20, 40, 70]
         for attempt in range(3):
-            res = requests.post(url, json=body, timeout=40)
+            try:
+                res = requests.post(url, json=body, timeout=50)
+            except requests.exceptions.Timeout:
+                return "⏳ Gemini timeout. Probald ujra!"
+            except requests.exceptions.ConnectionError:
+                return "❌ Gemini kapcsolat hiba."
 
             if res.status_code == 200:
                 data = res.json()
                 candidates = data.get("candidates", [])
                 if not candidates:
-                    print(f"Gemini: ures candidates. Valasz: {data}")
-                    return "Az AI nem tudott valaszt generalni. Probald ujra!"
+                    reason = data.get("promptFeedback", {}).get("blockReason", "ismeretlen")
+                    print(f"[GEMINI] Ures candidates, ok: {reason}. Valasz: {data}")
+                    return f"⚠️ Gemini nem generalt valaszt (ok: {reason}). Probald kesobb!"
                 return candidates[0]["content"]["parts"][0]["text"]
 
-            elif res.status_code == 429:
-                wait = 15 * (attempt + 1)
-                print(f"GEMINI RATE LIMIT! Varakozas {wait}s... (proba {attempt+1}/3)")
+            elif res.status_code in (429, 503):
+                wait = wait_times[attempt]
+                print(f"[GEMINI] {res.status_code} - varakozas {wait}s (proba {attempt+1}/3)")
                 time.sleep(wait)
                 continue
 
-            else:
-                print(f"Gemini API hiba {res.status_code}: {res.text[:300]}")
-                return None
+            elif res.status_code == 400:
+                print(f"[GEMINI] 400 bad request: {res.text[:300]}")
+                return "❌ Gemini 400 hiba (tul hosszu prompt)."
 
-        return "Az AI percenkenti limit elerte (15 keres/perc). Varj ~1 percet es probald ujra!"
+            else:
+                print(f"[GEMINI] {res.status_code}: {res.text[:200]}")
+                return f"❌ Gemini {res.status_code} hiba. Probald kesobb!"
+
+        return "⏳ Gemini tulterhelt (429/503). Varj 2-3 percet es probald ujra!"
 
     except Exception as e:
-        print(f"Gemini hivas hiba: {e}")
-        return None
+        print(f"[GEMINI] Kivatel: {type(e).__name__}: {e}")
+        return f"❌ Hiba: {type(e).__name__}: {str(e)[:100]}"
 
 async def get_ai_tip(skin_name, current_price):
     hist_result = format_history_for_ai(skin_name)
@@ -713,6 +862,18 @@ async def main_loop():
     global last_heartbeat
 
     channel = await client.fetch_channel(CHANNEL_ID)
+
+    # MongoDB history + tracking visszatöltése
+    if mongo_ok:
+        await channel.send("🗄️ MongoDB history betöltése...")
+        loop_ref = asyncio.get_running_loop()
+        pts      = await loop_ref.run_in_executor(executor, mongo_load_history_into_memory)
+        await channel.send(f"✅ {pts:,} ár-pont betöltve a MongoDB-ből!")
+        saved = mongo_load_all_tracking()
+        if saved:
+            manual_tracking.update(saved)
+            await channel.send(f"📋 {len(saved)} skin-követés visszaállítva.")
+
     await channel.send("Online! Elemzem a ládákat...")
 
     # Ládák árai - darabolva ha kell
@@ -752,7 +913,8 @@ async def main_loop():
             current_time = time.time()
 
             if current_time - last_heartbeat > 3600:
-                await channel.send("Bot online es figyel!")
+                db_str = "✅ Csatlakozva" if mongo_ok else "❌ In-memory mod (adatok elvesznek ujraindításkor!)"
+                await channel.send(f"💓 Bot online! | MongoDB: {db_str}")
                 last_heartbeat = current_time
 
             await check_manual_tracking(channel)
@@ -802,6 +964,7 @@ async def main_loop():
 async def on_ready():
     global loop_started
     print(f"Bot bejelentkezve: {client.user}")
+    init_mongodb()   # MongoDB kapcsolat (szinkron, max 5mp)
     try:
         synced = await tree.sync()
         print(f"Slash commandok szinkronizalva: {len(synced)} db")
