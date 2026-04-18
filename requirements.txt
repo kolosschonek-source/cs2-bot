@@ -3,3 +3,5 @@ requests
 certifi
 pymongo[srv]==4.7.2
 dnspython>=2.3.0
+beautifulsoup4
+ 
