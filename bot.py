@@ -7,6 +7,7 @@ import discord
 import asyncio
 import json
 from collections import defaultdict
+from news_monitor import news_monitor_loop
 from concurrent.futures import ThreadPoolExecutor
 
 # -------------------------
