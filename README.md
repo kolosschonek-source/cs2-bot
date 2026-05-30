@@ -1,1 +1,1 @@
-# cs2-bot
+I make this cs2 ,,cs2 tradingboz" whit using ai.
